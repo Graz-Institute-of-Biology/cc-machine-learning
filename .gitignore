@@ -8,3 +8,4 @@ env.yaml
 /mask
 /configs
 *.pdf
+*.yaml
