@@ -1,1 +1,10 @@
 env.yaml
+/__pycache__
+/test
+/train
+/valid
+/lightning_logs
+/results
+/mask
+/configs
+*.pdf
