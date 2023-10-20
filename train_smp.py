@@ -87,7 +87,11 @@ class Trainer():
         
         self.activation = 'softmax2d'
         self.device = 'cuda'
-        self.lr = 0.0001
+        self.lr_count = 0
+        self.train_batch_size = 1
+        self.val_batch_size = 1
+        self.lr_schedule = [1e-4,1e-5,1e-6,1e-7,1e-8,1e-9]
+        self.lr = self.lr_schedule[self.lr_count]
 
         self.preprocessing_fn = smp.encoders.get_preprocessing_fn(self.encoder, self.encoder_weights)
 
@@ -135,8 +139,8 @@ class Trainer():
             preprocessing=get_preprocessing(self.preprocessing_fn),
         )
 
-        self.train_loader = DataLoader(self.train_dataset, batch_size=1, shuffle=True, num_workers=1)
-        self.valid_loader = DataLoader(self.valid_dataset, batch_size=1, shuffle=False, num_workers=1)
+        self.train_loader = DataLoader(self.train_dataset, batch_size=self.train_batch_size, shuffle=True, num_workers=1)
+        self.valid_loader = DataLoader(self.valid_dataset, batch_size=self.val_batch_size, shuffle=False, num_workers=1)
 
 
 
@@ -153,8 +157,12 @@ class Trainer():
         )
 
 
-        self.loss = smp.losses.DiceLoss(mode='multilabel')
-        self.loss.__name__ = 'Dice_loss'
+        # self.dice_loss = smp.losses.DiceLoss(mode='multilabel')
+        # self.dice_loss.__name__ = 'Dice_loss'
+
+        self.focal_loss = smp.losses.FocalLoss(mode='multilabel')
+        self.focal_loss.__name__ = 'Focal_loss'
+        self.loss = self.focal_loss
 
         self.metrics = [
             smp_metrics.IoU(threshold=0.5),
@@ -191,8 +199,8 @@ class Trainer():
         print("Training on {0} images".format(len(self.images_fps)))
         max_score = 0
 
-        self.train_log_df = pd.DataFrame(columns=['Dice_loss', 'iou_score'])
-        self.valid_log_df = pd.DataFrame(columns=['Dice_loss', 'iou_score'])
+        self.train_log_df = pd.DataFrame(columns=[self.focal_loss.__name__, 'iou_score'])
+        self.valid_log_df = pd.DataFrame(columns=[self.focal_loss.__name__, 'iou_score'])
 
 
         for i in range(0, epochs):
@@ -207,12 +215,16 @@ class Trainer():
                 torch.save(self.model, self.model_save_path)
                 print('Model saved!')
                 
-            if i == 25:
-                self.optimizer.param_groups[0]['lr'] = 1e-5
-                print('Decrease decoder learning rate to 1e-5!')
+            # if (i+1)%25 == 0:
+                # self.lr_count += 1
+                # self.lr = self.lr_schedule[self.lr_count]
+                # self.optimizer.param_groups[0]['lr'] = self.lr
+                # print('Decrease decoder learning rate to {0}!'.format(self.lr))
+
+
             
-            self.train_log_df.loc[i] = [self.train_logs['Dice_loss'], self.train_logs['iou_score']]
-            self.valid_log_df.loc[i] = [self.valid_logs['Dice_loss'], self.valid_logs['iou_score']]
+            self.train_log_df.loc[i] = [self.train_logs[self.focal_loss.__name__], self.train_logs['iou_score']]
+            self.valid_log_df.loc[i] = [self.valid_logs[self.focal_loss.__name__], self.valid_logs['iou_score']]
 
 
         self.train_log_df.to_csv(os.path.join(self.exp_dir, "train_log.csv"))
@@ -220,6 +232,7 @@ class Trainer():
 
         self.pdf = PdfPages(self.pdf_path)
         self.save_loss_plots()
+        self.pdf.close()
 
     def save_loss_plots(self):
         title = "Model: {0}, Seed: {1}".format(self.encoder, self.seed)
@@ -308,7 +321,7 @@ class Trainer():
             self.model = torch.load(self.model_save_path)
         print("Model loaded!")
 
-    def set_pdf_path(self):
+    def set_pdf_path_pred(self):
         """set path to pdf file for saving predictions and results
         """
         pdf_path = os.path.join(self.exp_dir, "predictions.pdf")
@@ -319,18 +332,19 @@ class Trainer():
             count += 1
         self.pdf = PdfPages(pdf_path)
 
-    def test_model(self):
-        valid_dataset = Dataset(
-            self.x_test, 
-            self.y_test,
-            class_values=self.class_values,
-            preprocessing=get_preprocessing(self.preprocessing_fn),
-        )
+    def test_model(self, valid_dataset=None):
+        if valid_dataset == None:
+            valid_dataset = Dataset(
+                self.x_test, 
+                self.y_test,
+                class_values=self.class_values,
+                preprocessing=get_preprocessing(self.preprocessing_fn),
+            )
 
         self.class_dict = {"Background" : 0,
-                        "liverwort" : 1,
+                        "Liverwort" : 1,
                         "Bryophytes" : 2,
-                        "cyanosliverwort" : 3,
+                        "Liverwort & Cyanos" : 3,
                         "Bryophytes & Cyanos" : 4,
                         "Lichen" : 5,
                         "Bark-Dominated" : 6,
@@ -340,7 +354,7 @@ class Trainer():
         
         self.class_values = list(self.class_dict.values())
 
-        self.set_pdf_path()
+        self.set_pdf_path_pred()
         self.load_model()
 
         for n in range(len(valid_dataset)):
@@ -369,7 +383,7 @@ class Trainer():
         """ calculate predictions for all images in test folder and save it to pdf
         """
 
-        self.set_pdf_path()
+        self.set_pdf_path_pred()
         self.load_model()
 
         img_paths = [os.path.join(self.test_dir, x) for x in os.listdir(self.test_dir)]
@@ -411,8 +425,10 @@ if __name__ == "__main__":
     # encoder_list = ['mit_b0', 'efficientnet-b3', 'efficientnet-b7', 'vgg16', 'resnet50']
     encoder_list = ['mit_b5']
     # seeds = [20,30,40,50]
-    seeds = [60, 70, 80, 90, 100, 110]
+    # seeds = [60, 70, 80, 90, 100, 110]
 
+    seeds = [10]
+    
     args = parse_args()
 
     if args.mode == 'train':
@@ -432,9 +448,9 @@ if __name__ == "__main__":
         # for encoder in encoder_list:
         encoder = 'mit_b5'
         print("Test: ", encoder, "\n")
-        model_path = "/usr/people/EDVZ/faulhamm/cc-machine-learning/experiments/exp_mit_b5_1/best_model.pth"
+        model_path = "/usr/people/EDVZ/faulhamm/cc-machine-learning/experiments/exp_mit_b5_17/best_model.pth"
         trainer = Trainer(encoder=encoder, test=True, model_path=model_path)
-        trainer.set_paths()
+        trainer.set_paths(seed=seeds[0])
         trainer.test_model()
 
     elif args.mode == 'predict':
@@ -443,5 +459,5 @@ if __name__ == "__main__":
         model_path = "/usr/people/EDVZ/faulhamm/cc-machine-learning/experiments/exp_mit_b5_1/best_model.pth"
         print("Predict: ", encoder, "\n")
         trainer = Trainer(encoder=encoder, test=True, model_path=model_path)
-        trainer.set_paths()
+        trainer.set_paths(seed=seeds[0])
         trainer.predict()
