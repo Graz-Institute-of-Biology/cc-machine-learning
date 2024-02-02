@@ -1,17 +1,17 @@
 import albumentations as albu
 
 
-def get_training_augmentation():
+def get_training_augmentation(min_height=1024, min_width=1024):
     train_transform = [
 
         albu.HorizontalFlip(p=0.5),
 
-        albu.ShiftScaleRotate(scale_limit=0.5, rotate_limit=0, shift_limit=0.1, p=1, border_mode=0),
+        albu.ShiftScaleRotate(scale_limit=0.1, rotate_limit=45, shift_limit=0.1, p=1, border_mode=0),
 
-        albu.PadIfNeeded(min_height=320, min_width=320, always_apply=True, border_mode=0),
-        albu.RandomCrop(height=320, width=320, always_apply=True),
+        albu.PadIfNeeded(min_height=min_height, min_width=min_width, always_apply=True, border_mode=0),
+        # albu.RandomCrop(height=320, width=320, always_apply=True),
 
-        albu.IAAAdditiveGaussianNoise(p=0.2),
+        # albu.IAAAdditiveGaussianNoise(p=0.2),
         albu.IAAPerspective(p=0.5),
 
         # albu.OneOf(
@@ -29,7 +29,7 @@ def get_training_augmentation():
                 albu.Blur(blur_limit=3, p=1),
                 albu.MotionBlur(blur_limit=3, p=1),
             ],
-            p=0.9,
+            p=0.2,
         ),
 
         # albu.OneOf(
@@ -43,10 +43,10 @@ def get_training_augmentation():
     return albu.Compose(train_transform)
 
 
-def get_validation_augmentation():
+def get_validation_augmentation(min_height=1024, min_width=1024):
     """Add paddings to make image shape divisible by 32"""
     test_transform = [
-        albu.PadIfNeeded(384, 480)
+        albu.PadIfNeeded(min_height=min_height, min_width=min_width)
     ]
     return albu.Compose(test_transform)
 
