@@ -11,3 +11,4 @@ env.yaml
 /comp
 *.pdf
 *.yaml
+*.pth
