@@ -13,3 +13,4 @@ env.yaml
 *.yaml
 *.pth
 *.csv
+*.sh
