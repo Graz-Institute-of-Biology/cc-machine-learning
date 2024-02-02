@@ -6,6 +6,8 @@ env.yaml
 /lightning_logs
 /results
 /mask
+/mask_upload
 /configs
+/comp
 *.pdf
 *.yaml
