@@ -7,18 +7,20 @@ import cv2
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 from smp_dataset import Dataset
-import albumentations as albu
+# import albumentations as albus
 import torch
 import numpy as np
 import segmentation_models_pytorch as smp
 import segmentation_models_pytorch.utils.metrics as smp_metrics
 import ssl
 import random
+from tqdm import tqdm
 from pathlib import Path
 import yaml
 import pandas as pd
 from matplotlib.backends.backend_pdf import PdfPages
 import argparse
+import uuid
 from training_helper import get_preprocessing, get_training_augmentation, get_validation_augmentation
 ssl._create_default_https_context = ssl._create_unverified_context
 
@@ -26,48 +28,18 @@ ssl._create_default_https_context = ssl._create_unverified_context
 
 class Trainer():
 
-    def __init__(self, encoder='efficientnet-b3', encoder_weights='imagenet', test=False, model_path=None):
+    def __init__(self, encoder='efficientnet-b3', encoder_weights='imagenet', seed=10):
 
-        with open("config.yaml") as f:
-            yaml_file = yaml.safe_load(f)
-
+        self.load_config()
+        self.seed = seed
         # PATHS SERVER
-        self.img_dir = Path(os.path.join(yaml_file["img_dir"], str(yaml_file["size"])))
-        self.mask_dir = Path(os.path.join(yaml_file["mask_dir"], str(yaml_file["size"])))
-        self.exp_dir = Path(os.path.join(yaml_file["exp_dir"], "exp_{0}".format(encoder)))
-        self.test_dir = Path(os.path.join(yaml_file["test_dir"]))
-        self.best_model_path = model_path
-
-        if not test:
-            # check if exp_dir exists and create new one
-            count = 1
-            exp_dir = self.exp_dir
-            while exp_dir.exists():
-                exp_dir = Path(str(self.exp_dir) + "_{0}".format(count))
-                count += 1
-
-            self.exp_dir = exp_dir
-            os.makedirs(self.exp_dir)
-
-        elif test:
-            self.exp_dirs = sorted([x for x in os.listdir(Path(yaml_file["exp_dir"])) if encoder in x])
-            print(self.exp_dirs)
-            self.exp_dir = Path(os.path.join(Path(yaml_file["exp_dir"]), self.exp_dirs[-1]))
-            print(self.exp_dir)
-
-        pdf_path = os.path.join(self.exp_dir, "results.pdf")
-        count = 1
-        while os.path.exists(pdf_path):
-            pdf_path = os.path.join(self.exp_dir, "results_{0}.pdf".format(count))
-            count += 1
-            
-        self.pdf_path = pdf_path
-
-        # set model save path
-        self.model_save_path = os.path.join(self.exp_dir, 'best_model.pth')
+        self.img_dir = Path(os.path.join(self.yaml_file["img_dir"], str(self.yaml_file["size"])))
+        self.mask_dir = Path(os.path.join(self.yaml_file["mask_dir"], str(self.yaml_file["size"])))
+        self.exp_dir = Path(os.path.join(self.yaml_file["exp_dir"], "exp_{0}_{1}".format(encoder, self.seed)))
+        self.test_dir = Path(os.path.join(self.yaml_file["test_dir"]))
 
         # image size: 2048, 1024, 512, 256
-        self.size = yaml_file["size"]
+        self.size = self.yaml_file["size"]
 
         # model settings
         self.encoder = encoder
@@ -81,6 +53,16 @@ class Trainer():
 								"barkdominated" : 6,
 								"cyanosbark" : 7,
 								"other" : 8,
+                            }
+        self.ontology = {	    "background" : "#000000",
+                                "liverwort" : "#1cffbb",
+								"moss" : "#00bcff",
+								"cyanosliverwort" : "#0059ff",
+								"cyanosmoss" : "#2601d8",
+								"lichen" : "#ff00c3",
+								"barkdominated" : "#Ff0000",
+								"cyanosbark" : "#FFA500",
+								"other" : "#FFFF00",
                             }
         
         self.class_values = list(self.class_dict.values())
@@ -96,14 +78,54 @@ class Trainer():
         self.preprocessing_fn = smp.encoders.get_preprocessing_fn(self.encoder, self.encoder_weights)
 
 
-    def set_paths(self, train_split=0.8, seed=10):
+    def load_config(self):
+        """ load server config by default, if not available load local config
+        """
+        with open("server_config.yaml") as f:
+            self.yaml_file = yaml.safe_load(f)
+            self.best_model_path = self.yaml_file["best_model_path"]
+
+        if not Path(self.yaml_file["img_dir"]).exists():
+            with open("local_config.yaml") as f:
+                self.yaml_file = yaml.safe_load(f)
+                self.best_model_path = self.yaml_file["best_model_path"]
+
+    def set_paths(self, train_split=0.8, train=False, test=False, pred=False):
         """Set train, valid, test paths for images and masks.
         """
-        self.seed = seed
+
+        if train:
+            # check if exp_dir exists and create new one
+            exp_dir = Path(str(self.exp_dir) + "_" + str(uuid.uuid4())[:6])
+            while exp_dir.exists():
+                exp_dir = Path(str(self.exp_dir) + "_" + str(uuid.uuid4())[:6])
+
+            self.exp_dir = exp_dir
+            os.makedirs(self.exp_dir)
+
+        if test:
+            self.exp_dirs = [x for x in os.listdir(Path(self.yaml_file["exp_dir"])) if encoder in x]
+            self.sorted_exp_dirs = sorted(self.exp_dirs, key=lambda x: int(x.split("_")[-1]))
+            self.exp_dir = Path(os.path.join(Path(self.yaml_file["exp_dir"]), self.sorted_exp_dirs[-1]))
+            print(self.exp_dir)
+        if pred:
+            print("Predicting images from: ", self.test_dir)
+
+
+        pdf_path = os.path.join(self.exp_dir, "results.pdf")
+        count = 1
+        while os.path.exists(pdf_path):
+            pdf_path = os.path.join(self.exp_dir, "results_{0}.pdf".format(count))
+            count += 1
+            
+        self.pdf_path = pdf_path
+
+        # set model save path
+        self.model_save_path = os.path.join(self.exp_dir, 'best_model.pth')
         np.random.seed(self.seed)
 
         self.ids = os.listdir(self.img_dir)
-        self.images_fps = sorted([os.path.join(self.img_dir, image_id) for image_id in self.ids])
+        self.images_fps = sorted([os.path.join(self.img_dir, image_id) for image_id in self.ids if image_id.lower().endswith(".jpg")])
         self.masks_fps = sorted([os.path.join(self.mask_dir, image_id.replace("JPG", "png")) for image_id in self.ids])
 
         train_len = int(len(self.images_fps) * train_split)
@@ -122,12 +144,19 @@ class Trainer():
         self.y_test = self.y_valid
 
 
-    def create_dataloaders(self):
+    def create_dataloaders(self, augmentations=True):
+        if augmentations:
+            training_augmentation = get_training_augmentation(min_height=1024, min_width=1024)
+            validation_augmentation = get_validation_augmentation(min_height=1024, min_width=1024)
+        else:
+            training_augmentation = None
+            validation_augmentation = None
+
         self.train_dataset = Dataset(
             self.x_train, 
             self.y_train,
             class_values=self.class_values,
-            augmentation=get_training_augmentation(), 
+            augmentation=training_augmentation, 
             preprocessing=get_preprocessing(self.preprocessing_fn),
         )
 
@@ -135,7 +164,7 @@ class Trainer():
             self.x_valid, 
             self.y_valid,
             class_values=self.class_values,
-            augmentation=get_validation_augmentation(), 
+            augmentation=validation_augmentation, 
             preprocessing=get_preprocessing(self.preprocessing_fn),
         )
 
@@ -157,10 +186,11 @@ class Trainer():
         )
 
 
-        # self.dice_loss = smp.losses.DiceLoss(mode='multilabel')
+        #  self.dice_loss = smp.losses.DiceLoss(mode='multilabel', ignore_index=[0])
         # self.dice_loss.__name__ = 'Dice_loss'
+        # self.loss = self.dice_loss
 
-        self.focal_loss = smp.losses.FocalLoss(mode='multilabel')
+        self.focal_loss = smp.losses.FocalLoss(mode='multilabel', ignore_index=[0])
         self.focal_loss.__name__ = 'Focal_loss'
         self.loss = self.focal_loss
 
@@ -193,27 +223,43 @@ class Trainer():
             verbose=True,
         )
 
+    def save_model(self, epoch):
+        """save model to model_save_path
+        """
+        ckpt_dict = {
+            'model_state_dict': self.model.state_dict(),
+            # 'optimizer_state_dict': self.optimizer.state_dict(),
+            'train_dl': self.train_loader,
+            'valid_dl': self.valid_loader,
+            'epoch': epoch,
+            'ontology' : self.ontology,
+        }
+        torch.save(ckpt_dict, self.model_save_path)
 
     def train_model(self, epochs=1):
 
         print("Training on {0} images".format(len(self.images_fps)))
         max_score = 0
 
-        self.train_log_df = pd.DataFrame(columns=[self.focal_loss.__name__, 'iou_score'])
-        self.valid_log_df = pd.DataFrame(columns=[self.focal_loss.__name__, 'iou_score'])
+        self.train_log_df = pd.DataFrame(columns=[self.loss.__name__, 'iou_score'])
+        self.valid_log_df = pd.DataFrame(columns=[self.loss.__name__, 'iou_score'])
 
 
         for i in range(0, epochs):
             
-            print('\nEpoch: {}'.format(i))
+            print('\n Seed {0} | Epoch: {1}/{2}'.format(self.seed, i, epochs))
             self.train_logs = self.train_epoch.run(self.train_loader)
             self.valid_logs = self.valid_epoch.run(self.valid_loader)
             
             # do something (save model, change lr, etc.)
             if max_score < self.valid_logs['iou_score']:
                 max_score = self.valid_logs['iou_score']
-                torch.save(self.model, self.model_save_path)
+                # torch.save(self.model, self.model_save_path)
+                self.save_model(epoch=i)
+
                 print('Model saved!')
+
+                self.save_loss_plots()
                 
             # if (i+1)%25 == 0:
                 # self.lr_count += 1
@@ -223,24 +269,26 @@ class Trainer():
 
 
             
-            self.train_log_df.loc[i] = [self.train_logs[self.focal_loss.__name__], self.train_logs['iou_score']]
-            self.valid_log_df.loc[i] = [self.valid_logs[self.focal_loss.__name__], self.valid_logs['iou_score']]
+            self.train_log_df.loc[i] = [self.train_logs[self.loss.__name__], self.train_logs['iou_score']]
+            self.valid_log_df.loc[i] = [self.valid_logs[self.loss.__name__], self.valid_logs['iou_score']]
 
 
         self.train_log_df.to_csv(os.path.join(self.exp_dir, "train_log.csv"))
         self.valid_log_df.to_csv(os.path.join(self.exp_dir, "valid_log.csv"))
 
-        self.pdf = PdfPages(self.pdf_path)
         self.save_loss_plots()
-        self.pdf.close()
 
     def save_loss_plots(self):
+        """save plots for training and validation loss
+        """
+        self.pdf = PdfPages(self.pdf_path)
+
         title = "Model: {0}, Seed: {1}".format(self.encoder, self.seed)
         fig, ax = plt.subplots(figsize=(16, 5), ncols=2)
         fig.suptitle(title)
 
-        ax[0].plot(self.train_log_df.index, self.train_log_df['Dice_loss'], label='train Dice loss')
-        ax[0].plot(self.valid_log_df.index, self.valid_log_df['Dice_loss'], label='valid Dice loss')
+        ax[0].plot(self.train_log_df.index, self.train_log_df[self.loss.__name__], label='train Dice loss')
+        ax[0].plot(self.valid_log_df.index, self.valid_log_df[self.loss.__name__], label='valid Dice loss')
 
         ax[1].plot(self.train_log_df.index, self.train_log_df['iou_score'], label='train iou score')
         ax[1].plot(self.valid_log_df.index, self.valid_log_df['iou_score'], label='valid iou score')
@@ -248,6 +296,7 @@ class Trainer():
         plt.legend()
 
         self.pdf.savefig(fig)
+        self.pdf.close()
         
     def save_images_to_pdf(self, title=None, **images):
         """
@@ -256,7 +305,6 @@ class Trainer():
         """
         from matplotlib.colors import ListedColormap, BoundaryNorm
         import matplotlib.patches as mpatches
-        from PIL import ImageColor
 
         n = len(images)
 
@@ -277,7 +325,7 @@ class Trainer():
             plt.xticks([])
             plt.yticks([])
             plt.title(' '.join(name.split('_')).title())
-            print(name)
+
             if not name == 'image':
                 image = image.transpose(1, 2, 0)
                 out = np.zeros((image.shape[0], image.shape[1]), dtype=np.int64)
@@ -292,10 +340,6 @@ class Trainer():
 
                 # plot all class values in legend
                 # patches = [ mpatches.Patch(color=colors_hex[e], label=labels[i] ) for i,e in enumerate(self.class_values)]
-
-                print(colors_hex)
-                print(labels)
-                print(unique_values)
                 
                 # plot only unique class values in legend
                 patches = [ mpatches.Patch(color=colors_hex[i], label=labels[i] ) for i in unique_values]
@@ -308,13 +352,43 @@ class Trainer():
         self.pdf.savefig(fig)
         plt.close()
 
+    def print_summary(self, checkpoint):
+        """Print summary of model and training results (before loading)
+
+        Args:
+            checkpoint (dictionary): checkpoint dictionary of ml-model
+        """
+
+        print("Summary: ")
+        print("Epoch: ", checkpoint['epoch'])
+        print("Ontology: ", checkpoint['ontology'])
+
     def load_model(self):
-        """load model from model_save_path
+
+        print("Loading checkpoint from: ")
+        print(self.model_save_path)
+        checkpoint = torch.load(self.model_save_path)
+        print("Checkpoint loaded!")
+        self.print_summary(checkpoint)
+        self.prepare_model()
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        print("Model loaded!")
+
+        if not self.best_model_path == None:
+            self.exp_dir = Path(self.best_model_path).parent
+            print("Set exp dir to: ", self.exp_dir)
+        
+
+    def load_model_old(self):
+        """load (old) model from model_save_path;
+        "old" model was saved using torch.save(ENTIRE MODEL, path);
+        "new" model was saved using torch.save(MODEL_DICT, path) which requires new load function
         """
         print("Loading model from: ")
         print(self.model_save_path)
         if not self.best_model_path == None:
-            self.model = torch.load(self.best_model_path)
+            self.model = torch.load(self.best_model_path, map_location=torch.device(self.device))
             self.exp_dir = Path(self.best_model_path).parent
             print("Set exp dir to: ", self.exp_dir)
         else:
@@ -379,55 +453,104 @@ class Trainer():
             )
         self.pdf.close()
 
+    def calculate_prediction(self, img):
+        """calculate prediction for one image crop
+
+        Args:
+            img (np array): image read by opencv (color channels: BGR)
+
+        Returns:
+            np array: mask array with class values, color coded with class colors
+        """
+
+        x_tensor = torch.from_numpy(img).to(self.device).unsqueeze(0)
+        pr_mask = self.model.predict(x_tensor)
+        pr_mask = (pr_mask.squeeze().cpu().numpy().round())
+        pr_mask = pr_mask.transpose(1, 2, 0)
+
+        # img = preprocessing(image=img_show)['image']
+        # img = img.transpose(1, 2, 0)
+        out = np.zeros((pr_mask.shape[0], pr_mask.shape[1]), dtype=np.int64)
+
+        for v in self.class_values:
+            out[pr_mask[:,:,v] == 1] = v
+        
+        # img = out
+        unique_values = np.unique(out)
+
+        return out
+    
+    def save_output_mask(self, mask, img_name):
+        from PIL import Image
+
+        save_path = os.path.join(self.test_dir, img_name.replace(".JPG", "_mask_04.png"))
+        im = Image.fromarray(mask)
+        im.save(save_path)
+
+
     def predict(self):
         """ calculate predictions for all images in test folder and save it to pdf
         """
 
-        self.set_pdf_path_pred()
+        # self.set_pdf_path_pred()
         self.load_model()
 
-        img_paths = [os.path.join(self.test_dir, x) for x in os.listdir(self.test_dir)]
+        # self.test_dir = Path("C:\\Users\\faulhamm\\Documents\\Philipp\\Code\\cc-machine-learning\\test")
+        img_paths = [os.path.join(self.test_dir, x) for x in os.listdir(self.test_dir) if x.lower().endswith(".jpg")]
         preprocessing = get_preprocessing(self.preprocessing_fn)
-
-        img_paths = random.sample(img_paths, 35)
+        number_imgs = len(img_paths)
+        # img_paths = random.sample(img_paths, 35)
+        size = 1024
         for n in range(len(img_paths)):
-
             img_name = Path(img_paths[n]).name
-            print(img_name)
+            print("{0} / {1} | ".format(n, number_imgs, img_paths[n]))
             img = cv2.imread(img_paths[n])
-            try:
-                img_show = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            except cv2.error:
-                break
-            img = preprocessing(image=img_show)['image']
-        
-            x_tensor = torch.from_numpy(img).to(self.device).unsqueeze(0)
-            # img = img.transpose(1, 2, 0)
-            pr_mask = self.model.predict(x_tensor)
-            pr_mask = (pr_mask.squeeze().cpu().numpy().round())
-            
-            self.save_images_to_pdf(
-                title=img_name,
-                image=img_show, 
-                predicted_mask=pr_mask
-            )
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-        self.pdf.close()
+            original_img = img 
+
+            # create zeros array that is divisible by 1024
+            width = int(np.ceil(img.shape[1]/size) * size)
+            height = int(np.ceil(img.shape[0]/size) * size)
+            padded_img = np.zeros((height, width, 3), dtype=np.uint8)
+            padded_img[:img.shape[0], :img.shape[1], :] = img
+
+            whole_mask = np.zeros((height, width), dtype=np.uint8)
+            width_steps = np.arange(int(width/size))
+            height_steps = np.arange(int(height/size))
+            
+
+            for w in tqdm(width_steps):
+                for h in height_steps:
+                    img = padded_img[h*size:(h+1)*size, w*size:(w+1)*size, :]
+                    img = preprocessing(image=img)['image']
+
+                    color_coded_mask = self.calculate_prediction(img)
+                    whole_mask[h*size:(h+1)*size, w*size:(w+1)*size] = color_coded_mask
+                    
+
+                    # plt.figure()
+                    # plt.imshow(img)
+                    # plt.show()
+
+            whole_mask = whole_mask[:original_img.shape[0], :original_img.shape[1]]
+            self.save_output_mask(whole_mask, img_name)
+            
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train or test segmentation model')
-    parser.add_argument('--mode', default='train', type=str, help='mode: train or test')
+    parser.add_argument('--mode', default='predict', type=str, help='mode: "train" for training model \n "test" for testing with ground truth and save results to pdf file \n "predict" for predicting whole images and save prediction mask', required=False)
     args = parser.parse_args()
     return args
 
 if __name__ == "__main__":
     # encoder_list = ['mit_b0', 'efficientnet-b3', 'efficientnet-b7', 'vgg16', 'resnet50']
     encoder_list = ['mit_b5']
-    # seeds = [20,30,40,50]
-    # seeds = [60, 70, 80, 90, 100, 110]
+    # seeds = [10, 20, 30, 40, 50]
+    seeds = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150]
 
-    seeds = [10]
+    # seeds = [10]
     
     args = parse_args()
 
@@ -436,28 +559,26 @@ if __name__ == "__main__":
             for seed in seeds:
                 print("Train: ", encoder, "\n")
                 print("Seed: ", seed, "\n")
-                trainer = Trainer(encoder=encoder)
+                trainer = Trainer(encoder=encoder, seed=seed)
 
-                trainer.set_paths(seed=seed)
-                trainer.create_dataloaders()
+                trainer.set_paths(train_split=0.9, train=True)
+                trainer.create_dataloaders(augmentations=True)
                 trainer.prepare_model()
-                trainer.train_model(epochs=500)
+                trainer.train_model(epochs=200)
                 trainer.test_model()
     
     elif args.mode == 'test':
         # for encoder in encoder_list:
         encoder = 'mit_b5'
         print("Test: ", encoder, "\n")
-        model_path = "/usr/people/EDVZ/faulhamm/cc-machine-learning/experiments/exp_mit_b5_17/best_model.pth"
-        trainer = Trainer(encoder=encoder, test=True, model_path=model_path)
-        trainer.set_paths(seed=seeds[0])
+        trainer = Trainer(encoder=encoder, seed=seeds[0])
+        trainer.set_paths()
         trainer.test_model()
 
     elif args.mode == 'predict':
         # for encoder in encoder_list:
         encoder = 'mit_b5'
-        model_path = "/usr/people/EDVZ/faulhamm/cc-machine-learning/experiments/exp_mit_b5_1/best_model.pth"
         print("Predict: ", encoder, "\n")
-        trainer = Trainer(encoder=encoder, test=True, model_path=model_path)
-        trainer.set_paths(seed=seeds[0])
+        trainer = Trainer(encoder=encoder seed=seeds[0])
+        trainer.set_paths(pred=True)
         trainer.predict()
