@@ -2,11 +2,12 @@ import os
 import random
 import shutil
 
-data_path = "C:\\Users\\faulhamm\\OneDrive - Universität Graz\\Dokumente\\Philipp\\Data\\Terra Firme"
-training_path = "C:\\Users\\faulhamm\\OneDrive - Universität Graz\\Dokumente\\Philipp\\Data\\Training_Data\\Server\\train"
+data_path = "C:\\Users\\faulhamm\\OneDrive - Universität Graz\\Dokumente\\Philipp\\Data\\Campina"
+training_path = "C:\\Users\\faulhamm\\Documents\\Philipp\\training\\imgs"
 test_path = "C:\\Users\\faulhamm\\OneDrive - Universität Graz\\Dokumente\\Philipp\\Data\\test_data"
 
-height_zones = ["Canopy", "Main_stem", "Ground"]
+# height_zones = ["Canopy", "Main_stem", "Ground"]
+height_zones = ["Canopy", "Ground"]
 directions = ["East", "North", "South", "West"]
 
 training_images = os.listdir(training_path)
