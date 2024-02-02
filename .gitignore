@@ -12,3 +12,4 @@ env.yaml
 *.pdf
 *.yaml
 *.pth
+*.csv
