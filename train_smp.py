@@ -28,18 +28,19 @@ ssl._create_default_https_context = ssl._create_unverified_context
 
 class Trainer():
 
-    def __init__(self, encoder='efficientnet-b3', encoder_weights='imagenet', seed=10):
+    def __init__(self, encoder='efficientnet-b3', encoder_weights='imagenet', seed=10, load_config=True, device='cuda'):
 
-        self.load_config()
-        self.seed = seed
-        # PATHS SERVER
-        self.img_dir = Path(os.path.join(self.yaml_file["img_dir"], str(self.yaml_file["size"])))
-        self.mask_dir = Path(os.path.join(self.yaml_file["mask_dir"], str(self.yaml_file["size"])))
-        self.exp_dir = Path(os.path.join(self.yaml_file["exp_dir"], "exp_{0}_{1}".format(encoder, self.seed)))
-        self.test_dir = Path(os.path.join(self.yaml_file["test_dir"]))
+        if load_config:
+            self.load_config()
+            self.seed = seed
+            # PATHS SERVER
+            self.img_dir = Path(os.path.join(self.yaml_file["img_dir"], str(self.yaml_file["size"])))
+            self.mask_dir = Path(os.path.join(self.yaml_file["mask_dir"], str(self.yaml_file["size"])))
+            self.exp_dir = Path(os.path.join(self.yaml_file["exp_dir"], "exp_{0}_{1}".format(encoder, self.seed)))
+            self.test_dir = Path(os.path.join(self.yaml_file["test_dir"]))
 
-        # image size: 2048, 1024, 512, 256
-        self.size = self.yaml_file["size"]
+            # image size: 2048, 1024, 512, 256
+            self.size = self.yaml_file["size"]
 
         # model settings
         self.encoder = encoder
@@ -68,7 +69,7 @@ class Trainer():
         self.class_values = list(self.class_dict.values())
         
         self.activation = 'softmax2d'
-        self.device = 'cuda'
+        self.device = device
         self.lr_count = 0
         self.train_batch_size = 1
         self.val_batch_size = 1
@@ -76,7 +77,7 @@ class Trainer():
         self.lr = self.lr_schedule[self.lr_count]
 
         self.preprocessing_fn = smp.encoders.get_preprocessing_fn(self.encoder, self.encoder_weights)
-
+        self.preprocessing = get_preprocessing(self.preprocessing_fn)
 
     def load_config(self):
         """ load server config by default, if not available load local config
@@ -174,7 +175,8 @@ class Trainer():
 
 
     def prepare_model(self):
-        """Prepare model for training. Set loss, metrics, optimizer and training / validation runners.
+        """Prepare model for loading (training or testing/predicting).
+        Set loss, metrics, optimizer and training / validation runners.
         """
 
         # create segmentation model with pretrained encoder
@@ -487,8 +489,48 @@ class Trainer():
         im = Image.fromarray(mask)
         im.save(save_path)
 
+    def predict_whole_image(self, img):
+        """predict whole image by dividing it into 1024x1024 crops and calculate prediction for each crop
 
-    def predict(self):
+        Args:
+            img (np.ndarray or PIL): _description_
+
+        Returns:
+            np.ndarray: mask results for whole image (categorical values)
+        """
+        # create zeros array that is divisible by 1024
+        if not type(img) == np.ndarray:
+            img = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+
+        size = 1024
+        original_img = img
+        width = int(np.ceil(img.shape[1]/size) * size)
+        height = int(np.ceil(img.shape[0]/size) * size)
+        padded_img = np.zeros((height, width, 3), dtype=np.uint8)
+        padded_img[:img.shape[0], :img.shape[1], :] = img
+
+        whole_mask = np.zeros((height, width), dtype=np.uint8)
+        width_steps = np.arange(int(width/size))
+        height_steps = np.arange(int(height/size))
+
+
+        for w in tqdm(width_steps):
+            for h in height_steps:
+                img = padded_img[h*size:(h+1)*size, w*size:(w+1)*size, :]
+                img = self.preprocessing(image=img)['image']
+
+                color_coded_mask = self.calculate_prediction(img)
+                whole_mask[h*size:(h+1)*size, w*size:(w+1)*size] = color_coded_mask
+                
+
+                # plt.figure()
+                # plt.imshow(img)
+                # plt.show()
+        whole_mask = whole_mask[:original_img.shape[0], :original_img.shape[1]]
+
+        return whole_mask
+    
+    def predict(self, load_model=True, test_dir=None, model_path=None):
         """ calculate predictions for all images in test folder and save it to pdf
         """
 
@@ -497,43 +539,16 @@ class Trainer():
 
         # self.test_dir = Path("C:\\Users\\faulhamm\\Documents\\Philipp\\Code\\cc-machine-learning\\test")
         img_paths = [os.path.join(self.test_dir, x) for x in os.listdir(self.test_dir) if x.lower().endswith(".jpg")]
-        preprocessing = get_preprocessing(self.preprocessing_fn)
         number_imgs = len(img_paths)
         # img_paths = random.sample(img_paths, 35)
-        size = 1024
         for n in range(len(img_paths)):
             img_name = Path(img_paths[n]).name
             print("{0} / {1} | ".format(n, number_imgs, img_paths[n]))
+
             img = cv2.imread(img_paths[n])
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-            original_img = img 
-
-            # create zeros array that is divisible by 1024
-            width = int(np.ceil(img.shape[1]/size) * size)
-            height = int(np.ceil(img.shape[0]/size) * size)
-            padded_img = np.zeros((height, width, 3), dtype=np.uint8)
-            padded_img[:img.shape[0], :img.shape[1], :] = img
-
-            whole_mask = np.zeros((height, width), dtype=np.uint8)
-            width_steps = np.arange(int(width/size))
-            height_steps = np.arange(int(height/size))
-            
-
-            for w in tqdm(width_steps):
-                for h in height_steps:
-                    img = padded_img[h*size:(h+1)*size, w*size:(w+1)*size, :]
-                    img = preprocessing(image=img)['image']
-
-                    color_coded_mask = self.calculate_prediction(img)
-                    whole_mask[h*size:(h+1)*size, w*size:(w+1)*size] = color_coded_mask
-                    
-
-                    # plt.figure()
-                    # plt.imshow(img)
-                    # plt.show()
-
-            whole_mask = whole_mask[:original_img.shape[0], :original_img.shape[1]]
+            whole_mask = self.predict_whole_image(img)
             self.save_output_mask(whole_mask, img_name)
             
 
@@ -579,6 +594,6 @@ if __name__ == "__main__":
         # for encoder in encoder_list:
         encoder = 'mit_b5'
         print("Predict: ", encoder, "\n")
-        trainer = Trainer(encoder=encoder seed=seeds[0])
+        trainer = Trainer(encoder=encoder, seed=seeds[0])
         trainer.set_paths(pred=True)
         trainer.predict()
