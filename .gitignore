@@ -14,3 +14,4 @@ env.yaml
 *.pth
 *.csv
 *.sh
+*.pyc
