@@ -98,8 +98,9 @@ def plot_save_mask(mask, ontology):
     io_buf.close()
 
     print("done")
+    pil_img = Image.fromarray(img_arr)
     
-    return Image.fromarray(img_arr)
+    return pil_img
 
 def prepare_load_model(model_url):
     encoder = 'mit_b5'
