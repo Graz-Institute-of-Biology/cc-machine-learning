@@ -230,9 +230,9 @@ class Trainer():
         """
         ckpt_dict = {
             'model_state_dict': self.model.state_dict(),
-            # 'optimizer_state_dict': self.optimizer.state_dict(),
-            'train_dl': self.train_loader,
-            'valid_dl': self.valid_loader,
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            # 'train_dl': self.train_loader,
+            # 'valid_dl': self.valid_loader,
             'epoch': epoch,
             'ontology' : self.ontology,
         }
