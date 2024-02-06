@@ -230,9 +230,9 @@ class Trainer():
         """
         ckpt_dict = {
             'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            # 'train_dl': self.train_loader,
-            # 'valid_dl': self.valid_loader,
+            # 'optimizer_state_dict': self.optimizer.state_dict(),
+            'train_dl': self.train_loader,
+            'valid_dl': self.valid_loader,
             'epoch': epoch,
             'ontology' : self.ontology,
         }
@@ -502,25 +502,25 @@ class Trainer():
         if not type(img) == np.ndarray:
             img = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
 
-        size = 1024
+        # size = 1024
         original_img = img
-        width = int(np.ceil(img.shape[1]/size) * size)
-        height = int(np.ceil(img.shape[0]/size) * size)
+        width = int(np.ceil(img.shape[1]/self.size) * self.size)
+        height = int(np.ceil(img.shape[0]/self.size) * self.size)
         padded_img = np.zeros((height, width, 3), dtype=np.uint8)
         padded_img[:img.shape[0], :img.shape[1], :] = img
 
         whole_mask = np.zeros((height, width), dtype=np.uint8)
-        width_steps = np.arange(int(width/size))
-        height_steps = np.arange(int(height/size))
+        width_steps = np.arange(int(width/self.size))
+        height_steps = np.arange(int(height/self.size))
 
 
         for w in tqdm(width_steps):
             for h in height_steps:
-                img = padded_img[h*size:(h+1)*size, w*size:(w+1)*size, :]
+                img = padded_img[h*self.size:(h+1)*self.size, w*self.size:(w+1)*self.size, :]
                 img = self.preprocessing(image=img)['image']
 
                 color_coded_mask = self.calculate_prediction(img)
-                whole_mask[h*size:(h+1)*size, w*size:(w+1)*size] = color_coded_mask
+                whole_mask[h*self.size:(h+1)*self.size, w*self.size:(w+1)*self.size] = color_coded_mask
                 
 
                 # plt.figure()
