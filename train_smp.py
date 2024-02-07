@@ -490,7 +490,7 @@ class Trainer():
         im = Image.fromarray(mask)
         im.save(save_path)
 
-    def predict_whole_image(self, img):
+    def predict_whole_image(self, img, debug=False):
         """predict whole image by dividing it into 1024x1024 crops and calculate prediction for each crop
 
         Args:
@@ -515,6 +515,9 @@ class Trainer():
         whole_mask = np.zeros((height, width), dtype=np.uint8)
         width_steps = np.arange(int(width/self.size))
         height_steps = np.arange(int(height/self.size))
+
+        if debug:
+            return whole_mask
 
 
         for w in tqdm(width_steps):
