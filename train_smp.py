@@ -498,6 +498,8 @@ class Trainer():
         Returns:
             np.ndarray: mask results for whole image (categorical values)
         """
+        
+        print("predicting...")
         # create zeros array that is divisible by 1024
         if not type(img) == np.ndarray:
             img = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)

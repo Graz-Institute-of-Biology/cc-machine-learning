@@ -155,12 +155,10 @@ def predict(package: dict, input: list) -> np.ndarray:
     print("loading image...")
     img = load_image(image_url)
     print("Image loaded")
-    print("Creating trainer object...")
     trainer, ontology = create_trainer_object(model_url)
     mask_pred = trainer.predict_whole_image(img)
     # mask_pred = img
     color_coded_mask = plot_save_mask(mask_pred, ontology)
     print("Done")
-    print("predicting...")
     print("FINISHED")
     return mask_pred, color_coded_mask
