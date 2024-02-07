@@ -24,7 +24,7 @@ import numpy as np
 def update_analysis(id,completed=True):
     """update analysis entry in django backend
     """
-    analyses_url = 'django:8000/api/v1/analyses/' + str(id) + '/'
+    analyses_url = 'http://django:8000/api/v1/analyses/' + str(id) + '/'
 
     payload = {
         "completed" : completed,
@@ -40,7 +40,7 @@ def send_result(img, source_model_url, parent_file_url):
     Send result to to django backend
     """
     print("sending request...")
-    mask_api_url = 'django:8000/api/v1/masks/'
+    mask_api_url = 'http://django:8000/api/v1/masks/'
     
     img_byte_arr = io.BytesIO()
     img.save(img_byte_arr, format='png')
