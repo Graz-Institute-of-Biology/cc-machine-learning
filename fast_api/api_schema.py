@@ -13,6 +13,8 @@ class InferenceInput(BaseModel):
     file_path: str = Field(..., example='12/images/img_1.jpg', title='Path to the input image file')
     model_path: str = Field(..., example='12/models/model_1.pt', title='Path to the model file')
     analysis_id: int = Field(..., example=1, title='Analysis ID')
+    parent_img_id: int = Field(..., example=1, title='Parent Image ID')
+    ml_model_id: int = Field(..., example=1, title='ML Model ID')
 
 class InferenceResult(BaseModel):
     """
