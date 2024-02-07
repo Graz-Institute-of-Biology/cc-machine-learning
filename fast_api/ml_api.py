@@ -17,6 +17,7 @@ import matplotlib
 matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 from matplotlib.colors import ListedColormap, BoundaryNorm
+import json
 
 # from config import CONFIG
 import numpy as np
@@ -24,7 +25,7 @@ import numpy as np
 def update_analysis(id,completed=True):
     """update analysis entry in django backend
     """
-    analyses_url = 'http://django:8000/api/v1/analyses/' + str(id) + '/'
+    analyses_url = 'http://django:8000/api/v1/analyses/' + str(id) + '/' #localhost:8000 or django:8000 (if using docker)
 
     payload = {
         "completed" : completed,
@@ -35,12 +36,33 @@ def update_analysis(id,completed=True):
     print(response.text)
     print("done")
 
-def send_result(img, source_model_url, parent_file_url):
+def get_image(img_id):
+    """
+    Get image from django backend
+    """
+    print("getting image...")
+    image_url = 'http://django:8000/api/v1/images/{0}/'.format(img_id) #localhost:8000 or django:8000 (if using docker)
+
+    response = requests.get(image_url)
+    print(response.content)
+    encoded = response.content
+    decoded = json.loads(encoded.decode())
+    return decoded
+
+def send_result(img, package):
     """
     Send result to to django backend
     """
     print("sending request...")
-    mask_api_url = 'http://django:8000/api/v1/masks/'
+    mask_api_url = 'http://django:8000/api/v1/masks/' #localhost:8000 or django:8000 (if using docker)
+
+    source_model_url = package['model_path']
+    parent_file_url = package['file_path']
+    parent_img_id = package['parent_img_id']
+    ml_model_id = package['ml_model_id']
+
+    image_data = get_image(parent_img_id)
+    dataset = image_data['dataset']
     
     img_byte_arr = io.BytesIO()
     img.save(img_byte_arr, format='png')
@@ -52,9 +74,9 @@ def send_result(img, source_model_url, parent_file_url):
         "owner" : 'admin',
         "description" : "test description",
         "slug" : 'test',
-        "dataset" : 2,
-        "parent_image" : 1,
-        "source_model" : 7,
+        "dataset" : dataset,
+        "parent_image" : parent_img_id,
+        "source_model" : ml_model_id,
         "source_model_url" : source_model_url,
         "parent_image_url" : parent_file_url
     }
