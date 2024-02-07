@@ -28,8 +28,9 @@ ssl._create_default_https_context = ssl._create_unverified_context
 
 class Trainer():
 
-    def __init__(self, encoder='efficientnet-b3', encoder_weights='imagenet', seed=10, load_config=True, device='cuda'):
+    def __init__(self, encoder='efficientnet-b3', encoder_weights='imagenet', seed=10, load_config=True, device='cuda', size=1024):
 
+        self.size = size
         if load_config:
             self.load_config()
             self.seed = seed
