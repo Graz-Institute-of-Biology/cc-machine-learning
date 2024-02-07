@@ -72,12 +72,14 @@ def do_predict(request: Request, body: InferenceInput):
     package = {
         "model_path": body.model_path,
         "file_path": body.file_path,
-        "analysis_id": body.analysis_id
+        "analysis_id": body.analysis_id,
+        "parent_img_id": body.parent_img_id,
+        "ml_model_id": body.ml_model_id
     }
     try:
         mask_pred, color_coded_mask = predict(package=package, input=[])
         print("prediction function left...")
-        send_result(color_coded_mask, package['model_path'], package['file_path'])
+        send_result(color_coded_mask, package)
         update_analysis(package['analysis_id'], completed=True)
         return {
             "error": error,
