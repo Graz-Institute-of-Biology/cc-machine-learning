@@ -27,6 +27,10 @@ ssl._create_default_https_context = ssl._create_unverified_context
 
 
 class Trainer():
+    """Trainer class for training and testing segmentation model
+    Used for manual training on GPU server, for model testing/evaluation and
+    for predicting images
+    """
 
     def __init__(self, encoder='efficientnet-b3', encoder_weights='imagenet', seed=10, load_config=True, device='cuda', size=1024):
 
@@ -147,6 +151,12 @@ class Trainer():
 
 
     def create_dataloaders(self, augmentations=True):
+        """creates training and validation Datasets (using smp_dataset.py) and Dataloaders
+        if augmentations is True, training and validation augmentations are used
+
+        Args:
+            augmentations (bool, optional): use/dont use augmentations. Defaults to True.
+        """
         if augmentations:
             training_augmentation = get_training_augmentation(min_height=1024, min_width=1024)
             validation_augmentation = get_validation_augmentation(min_height=1024, min_width=1024)
@@ -227,13 +237,14 @@ class Trainer():
         )
 
     def save_model(self, epoch):
-        """save model to model_save_path
+        """save model to model_save_path (experiment folder + best_model.pth)
+        train/valid dataloaders seem to need a lot of memory and are not saved in the model
         """
         ckpt_dict = {
             'model_state_dict': self.model.state_dict(),
-            # 'optimizer_state_dict': self.optimizer.state_dict(),
-            'train_dl': self.train_loader,
-            'valid_dl': self.valid_loader,
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            # 'train_dl': self.train_loader,
+            # 'valid_dl': self.valid_loader,
             'epoch': epoch,
             'ontology' : self.ontology,
         }
@@ -367,6 +378,10 @@ class Trainer():
         print("Ontology: ", checkpoint['ontology'])
 
     def load_model(self):
+        """load checkpoint from model_save_path
+        after loading model (and if there is no best_model_path)
+        set exp_dir to parent of model_save_path
+        """
 
         print("Loading checkpoint from: ")
         print(self.model_save_path)
@@ -410,6 +425,11 @@ class Trainer():
         self.pdf = PdfPages(pdf_path)
 
     def test_model(self, valid_dataset=None):
+        """predict images from valid_dataset and save results to pdf
+
+        Args:
+            valid_dataset (Dataset, optional): image dataset used for testing. Defaults to None.
+        """
         if valid_dataset == None:
             valid_dataset = Dataset(
                 self.x_test, 
@@ -417,19 +437,6 @@ class Trainer():
                 class_values=self.class_values,
                 preprocessing=get_preprocessing(self.preprocessing_fn),
             )
-
-        self.class_dict = {"Background" : 0,
-                        "Liverwort" : 1,
-                        "Bryophytes" : 2,
-                        "Liverwort & Cyanos" : 3,
-                        "Bryophytes & Cyanos" : 4,
-                        "Lichen" : 5,
-                        "Bark-Dominated" : 6,
-                        "Bark & Cyanos" : 7,
-                        "Other" : 8,
-                    }
-        
-        self.class_values = list(self.class_dict.values())
 
         self.set_pdf_path_pred()
         self.load_model()
@@ -471,15 +478,10 @@ class Trainer():
         pr_mask = (pr_mask.squeeze().cpu().numpy().round())
         pr_mask = pr_mask.transpose(1, 2, 0)
 
-        # img = preprocessing(image=img_show)['image']
-        # img = img.transpose(1, 2, 0)
         out = np.zeros((pr_mask.shape[0], pr_mask.shape[1]), dtype=np.int64)
 
         for v in self.class_values:
             out[pr_mask[:,:,v] == 1] = v
-        
-        # img = out
-        unique_values = np.unique(out)
 
         return out
     
@@ -580,21 +582,21 @@ if __name__ == "__main__":
             for seed in seeds:
                 print("Train: ", encoder, "\n")
                 print("Seed: ", seed, "\n")
-                trainer = Trainer(encoder=encoder, seed=seed)
+                trainer = Trainer(encoder=encoder, seed=seed) # create Trainer object and set default values
 
-                trainer.set_paths(train_split=0.9, train=True)
-                trainer.create_dataloaders(augmentations=True)
-                trainer.prepare_model()
-                trainer.train_model(epochs=200)
+                trainer.set_paths(train_split=0.9, train=True) # set paths for training
+                trainer.create_dataloaders(augmentations=True) # create dataloaders from image and mask paths
+                trainer.prepare_model() # create Unet object and loss & metric objects and Training/Validation Epoch Runners
+                trainer.train_model(epochs=200) # start training routine using Training/Validation Epoch Runners
                 trainer.test_model()
     
     elif args.mode == 'test':
         # for encoder in encoder_list:
         encoder = 'mit_b5'
         print("Test: ", encoder, "\n")
-        trainer = Trainer(encoder=encoder, seed=seeds[0])
-        trainer.set_paths()
-        trainer.test_model()
+        trainer = Trainer(encoder=encoder, seed=seeds[0]) # create Trainer object and set default values
+        trainer.set_paths() # set paths for testing (not recently tested)
+        trainer.test_model() # test model
 
     elif args.mode == 'predict':
         # for encoder in encoder_list:
