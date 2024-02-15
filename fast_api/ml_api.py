@@ -60,12 +60,12 @@ def get_class_distributions(img, ontology, ignore_zero=True):
     """
     img = np.array(img)
 
-    if ignore_zero:
-        # denom = np.sum(img[img != 0])
-        print("Ignoring class 0 (Background))")
-        print("sum: ", denom)
-    else:
-        denom = np.sum(img)
+    # if ignore_zero:
+    #     # denom = np.sum(img[img != 0])
+    #     print("Ignoring class 0 (Background))")
+    #     print("sum: ", denom)
+    # else:
+    #     denom = np.sum(img)
 
     class_distributions = ontology.copy()
     class_names = list(ontology.keys())
