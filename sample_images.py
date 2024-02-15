@@ -2,12 +2,15 @@ import os
 import random
 import shutil
 
-data_path = "C:\\Users\\faulhamm\\OneDrive - Universität Graz\\Dokumente\\Philipp\\Data\\Campina"
+data_path = "C:\\Users\\faulhamm\\OneDrive - Universität Graz\\Dokumente\\Philipp\\Data\\ATTO\\Terra Firme"
 training_path = "C:\\Users\\faulhamm\\Documents\\Philipp\\training\\imgs"
-test_path = "C:\\Users\\faulhamm\\OneDrive - Universität Graz\\Dokumente\\Philipp\\Data\\test_data"
+test_path = "C:\\Users\\faulhamm\\Documents\\Philipp\\Code\\cc-machine-learning\\test\\atto\\Feb"
 
-# height_zones = ["Canopy", "Main_stem", "Ground"]
-height_zones = ["Canopy", "Ground"]
+if data_path.split("\\")[-1] == "Terra Firme":
+    height_zones = ["Canopy", "Main_stem", "Ground"]
+elif data_path.split("\\")[-1] == "Campina":
+    height_zones = ["Canopy", "Ground"]
+    
 directions = ["East", "North", "South", "West"]
 
 training_images = os.listdir(training_path)
@@ -28,3 +31,4 @@ for height_zone in height_zones:
             reduced = [x for x in reduced if x != sampled]
             shutil.copy2(sampled_path, test_path)
             num_copied += 1
+            print(sampled_path)
