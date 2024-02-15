@@ -32,9 +32,10 @@ class Trainer():
     for predicting images
     """
 
-    def __init__(self, encoder='efficientnet-b3', encoder_weights='imagenet', seed=10, load_config=True, device='cuda', size=1024):
+    def __init__(self, encoder='efficientnet-b3', encoder_weights='imagenet', seed=10, load_config=True, device='cuda', size=1024, pred=False):
 
         self.size = size
+        self.pred = pred
         if load_config:
             self.load_config()
             self.seed = seed
@@ -90,6 +91,7 @@ class Trainer():
         with open("server_config.yaml") as f:
             self.yaml_file = yaml.safe_load(f)
             self.best_model_path = self.yaml_file["best_model_path"]
+            print(self.best_model_path)
 
         if not Path(self.yaml_file["img_dir"]).exists():
             with open("local_config.yaml") as f:
@@ -116,7 +118,6 @@ class Trainer():
             print(self.exp_dir)
         if pred:
             print("Predicting images from: ", self.test_dir)
-
 
         pdf_path = os.path.join(self.exp_dir, "results.pdf")
         count = 1
@@ -384,8 +385,12 @@ class Trainer():
         """
 
         print("Loading checkpoint from: ")
-        print(self.model_save_path)
-        checkpoint = torch.load(self.model_save_path)
+        if not self.pred:
+            print(self.model_save_path)
+            checkpoint = torch.load(self.model_save_path)
+        elif self.pred:
+            print(self.best_model_path)
+            checkpoint = torch.load(self.best_model_path)
         print("Checkpoint loaded!")
         self.print_summary(checkpoint)
         self.prepare_model()
@@ -494,6 +499,7 @@ class Trainer():
 
     def predict_whole_image(self, img, debug=False):
         """predict whole image by dividing it into 1024x1024 crops and calculate prediction for each crop
+            if debug is True, return empty mask for testing
 
         Args:
             img (np.ndarray or PIL): _description_
@@ -602,6 +608,6 @@ if __name__ == "__main__":
         # for encoder in encoder_list:
         encoder = 'mit_b5'
         print("Predict: ", encoder, "\n")
-        trainer = Trainer(encoder=encoder, seed=seeds[0])
+        trainer = Trainer(encoder=encoder, seed=seeds[0], pred=True)
         trainer.set_paths(pred=True)
         trainer.predict()
