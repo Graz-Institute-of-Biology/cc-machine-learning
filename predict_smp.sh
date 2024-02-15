@@ -1,6 +1,6 @@
 #!/bin/bash
 
 #SBATCH -p gpu
-#SBATCH --gres=gpu:rtx2080ti:1
+#SBATCH --gres=gpu:a100.40gb
 
 python3 train_smp.py --mode "predict"
