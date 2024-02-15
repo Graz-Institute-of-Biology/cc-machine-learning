@@ -7,8 +7,7 @@ import os
 
 # Config that serves all environment
 GLOBAL_CONFIG = {
-    "MODEL_PATH": "../model/model.pt",
-    "SCALAR_PATH": "../model/scaler.joblib",
+    "HOST": "localhost", # default "localhost", "django" if using docker
     "USE_CUDA_IF_AVAILABLE": True,
     "ROUND_DIGIT": 6
 }
