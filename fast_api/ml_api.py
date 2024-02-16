@@ -72,10 +72,18 @@ def get_class_distributions(img, ontology, ignore_zero=True):
 
     class_distributions = ontology.copy()
     class_names = list(ontology.keys())
+    
+    # set all class distributions to 0
+    for key in class_distributions:
+        class_distributions[key] = 0
+
     unique, counts = np.unique(img, return_counts=True)
     denom = np.sum(counts[1:])
-    for i in unique:
-        name = class_names[i]
+    print("Unique: ", unique)
+    print("Counts: ", counts)
+    for i in range(len(unique)):
+        class_code = unique[i]
+        name = class_names[class_code]
         class_distributions[name] = round(counts[i]/denom, 5)
 
     del class_distributions['background']
