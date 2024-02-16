@@ -207,7 +207,7 @@ def predict(item, input: list) -> np.ndarray:
     img = load_image(image_url)
     trainer, ontology = create_trainer_object(model_url)
     update_analysis(item.analysis_id, completed=False, status="computing")
-    mask_pred = trainer.predict_whole_image(img, debug=True)
+    mask_pred = trainer.predict_whole_image(img)
     # mask_pred = img
     color_coded_mask = plot_save_mask(mask_pred, ontology)
     print("Img: {0} finished".format(image_url))
