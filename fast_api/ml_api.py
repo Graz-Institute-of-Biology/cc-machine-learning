@@ -200,7 +200,7 @@ def create_trainer_object(model_url):
     print("Done")
     return trainer, ontology
 
-def predict(item) -> np.ndarray:
+def predict(item, debug) -> np.ndarray:
     """
     """
     model_url = item.ml_model_path
@@ -208,17 +208,17 @@ def predict(item) -> np.ndarray:
     add_parent_dir()
     img = load_image(image_url)
     trainer, ontology = create_trainer_object(model_url)
-    mask_pred = trainer.predict_whole_image(img, debug=True)
+    mask_pred = trainer.predict_whole_image(img, debug=debug)
     # mask_pred = img
     print("Img: {0} finished".format(image_url))
     return mask_pred, ontology
 
 
-def manage_prediction_request(item):
+def manage_prediction_request(item, debug=False):
 
     try:
         update_analysis(item.analysis_id, completed=False, status="processing")
-        mask_pred, ontology = predict(item=item)
+        mask_pred, ontology = predict(item=item, debug=debug)
         color_coded_mask = plot_save_mask(mask_pred, ontology)
         update_analysis(item.analysis_id, completed=True, status="processed/sending result")
         send_result(color_coded_mask, mask_pred, ontology, item)
