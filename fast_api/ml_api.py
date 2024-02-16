@@ -6,6 +6,7 @@ import segmentation_models_pytorch as smp
 import requests
 from io import BytesIO
 import inspect
+import traceback
 import os
 import sys
 import cv2
@@ -24,7 +25,7 @@ import numpy as np
 
 # print(CONFIG)
 
-def update_analysis(analysis_id,completed=True, error="", status="none"):
+def update_analysis(analysis_id, status=None, completed=True, error=""):
     """update analysis entry in django backend
     """
     # analyses_url = 'http://django:8000/api/v1/analyses/{0}/'.format(str(analysis_id)) #localhost:8000 or django:8000 (if using docker)
@@ -34,8 +35,10 @@ def update_analysis(analysis_id,completed=True, error="", status="none"):
         "completed" : completed,
         "errors" : error,
         "end_time" : datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
-        "status" : status,
     }
+    if status:
+        payload["status"] = status
+
     print("sending analysis-PATCH-request...")
     response = requests.patch(analyses_url, data=payload)
     print("done")
@@ -90,7 +93,6 @@ def send_result(color_coded_img, categorically_coded_img, ontology, item):
     parent_file_url = item.file_path
     parent_img_id = item.parent_img_id
     ml_model_id = item.ml_model_id
-
     class_distributions = get_class_distributions(categorically_coded_img, ontology)
 
     image_data = get_image(parent_img_id)
@@ -198,7 +200,7 @@ def create_trainer_object(model_url):
     print("Done")
     return trainer, ontology
 
-def predict(item, input: list) -> np.ndarray:
+def predict(item) -> np.ndarray:
     """
     """
     model_url = item.ml_model_path
@@ -206,29 +208,29 @@ def predict(item, input: list) -> np.ndarray:
     add_parent_dir()
     img = load_image(image_url)
     trainer, ontology = create_trainer_object(model_url)
-    update_analysis(item.analysis_id, completed=False, status="computing")
-    mask_pred = trainer.predict_whole_image(img)
+    mask_pred = trainer.predict_whole_image(img, debug=True)
     # mask_pred = img
-    color_coded_mask = plot_save_mask(mask_pred, ontology)
     print("Img: {0} finished".format(image_url))
-    return mask_pred, color_coded_mask, ontology
+    return mask_pred, ontology
 
 
 def manage_prediction_request(item):
 
     try:
-        mask_pred, color_coded_mask, ontology = predict(item=item, input=[])
-        error = False
+        update_analysis(item.analysis_id, completed=False, status="processing")
+        mask_pred, ontology = predict(item=item)
+        color_coded_mask = plot_save_mask(mask_pred, ontology)
+        update_analysis(item.analysis_id, completed=True, status="processed/sending result")
         send_result(color_coded_mask, mask_pred, ontology, item)
-        update_analysis(item.analysis_id, completed=True, status="processed")
+        update_analysis(item.analysis_id, completed=True, status="processed & saved")
         return {
-            "error": error,
+            "error": False,
         }
     except Exception as e:
-        print("ERROR:")
-        print(e)
-        error = True
-        update_analysis(item.analysis_id, completed=False, error=e)
-        return {
-        "error": error,
-    }
+            print("ERROR:")
+            error = traceback.format_exc()
+            print(error)
+            update_analysis(item.analysis_id, completed=False, error=error)
+            return {
+            "error": True,
+        }

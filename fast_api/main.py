@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from api_schema import InferenceInput, InferenceResult, InferenceResponse, ErrorResponse
-from ml_api import manage_prediction_request
+from ml_api import manage_prediction_request, update_analysis
 from config import CONFIG
 from exception_handler import validation_exception_handler, python_exception_handler
 from concurrent.futures import ProcessPoolExecutor
@@ -44,7 +44,7 @@ async def lifespan(app: FastAPI):
     pool = ProcessPoolExecutor()
     asyncio.create_task(process_requests(q, pool))  # Start the requests processing task
     yield {'q': q, 'pool': pool}
-    pool.shutdown()     # Clean up the ML models and release the resources
+    pool.shutdown()
 
 # Initialize API Server
 app = FastAPI(
@@ -67,18 +67,14 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"])
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(Exception, python_exception_handler)
 
-fake_db = {}
-
 async def process_requests(q: asyncio.Queue, pool: ProcessPoolExecutor):
     while True:
         item = await q.get()
         loop = asyncio.get_running_loop()
-        fake_db[item.id] = 'Processing'
         print("Processing")
         print(item)
         r = await loop.run_in_executor(pool, manage_prediction_request, item)
         q.task_done()
-        fake_db[item.id] = 'Done'
 
 
 
@@ -96,28 +92,26 @@ async def do_predict(request: Request, body: InferenceInput, background_tasks: B
     model_path: str = Field(..., example='12/models/model_1.pt', title='Path to the model file')
     """
 
+    try:
+        update_analysis(body.analysis_id, completed=False, status="Received/Queued")
 
-    item_id = str(body.analysis_id)
-    item = Item(id=item_id,
-                ml_model_path=body.ml_model_path,
-                file_path=body.file_path,
-                analysis_id=body.analysis_id,
-                parent_img_id=body.parent_img_id,
-                ml_model_id=body.ml_model_id)
-    
-    background_tasks.add_task(request.state.q.put_nowait, item)
-    fake_db[item_id] = 'Pending'
+        item_id = str(body.analysis_id)
+        item = Item(id=item_id,
+                    ml_model_path=body.ml_model_path,
+                    file_path=body.file_path,
+                    analysis_id=body.analysis_id,
+                    parent_img_id=body.parent_img_id,
+                    ml_model_id=body.ml_model_id)
+        
+        background_tasks.add_task(request.state.q.put_nowait, item)
 
-    return {"error": False}
-
-    # try:
-    #     background_tasks.add_task(manage_prediction_request, package)
-    #     return {"error": False}
-    # except Exception as e:
-    #     print(e)
-    #     return {"error": True}
-
-
+        return {"error": False}
+    except Exception as e:
+        error = traceback.format_exc()
+        print("ERROR:")
+        print(error)
+        update_analysis(body.analysis_id, completed=False, error=error)
+        return {"error": True}
 
 
 @app.get('/about')
