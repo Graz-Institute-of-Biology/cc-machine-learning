@@ -70,13 +70,10 @@ def get_class_distributions(img, ontology, ignore_zero=True):
     class_distributions = ontology.copy()
     class_names = list(ontology.keys())
     unique, counts = np.unique(img, return_counts=True)
-    print(unique)
-    print(counts)
     denom = np.sum(counts[1:])
     for i in unique:
         name = class_names[i]
         class_distributions[name] = round(counts[i]/denom, 5)
-        print(class_distributions)
 
     del class_distributions['background']
     class_distributions = str(class_distributions)
@@ -84,15 +81,15 @@ def get_class_distributions(img, ontology, ignore_zero=True):
     print(class_distributions)
     return class_distributions
 
-def send_result(color_coded_img, categorically_coded_img, ontology, package):
+def send_result(color_coded_img, categorically_coded_img, ontology, item):
     """
     Send result to to django backend
     """
 
-    source_model_url = package['model_path']
-    parent_file_url = package['file_path']
-    parent_img_id = package['parent_img_id']
-    ml_model_id = package['ml_model_id']
+    source_model_url = item.ml_model_path
+    parent_file_url = item.file_path
+    parent_img_id = item.parent_img_id
+    ml_model_id = item.ml_model_id
 
     class_distributions = get_class_distributions(categorically_coded_img, ontology)
 
@@ -201,29 +198,29 @@ def create_trainer_object(model_url):
     print("Done")
     return trainer, ontology
 
-def predict(package: dict, input: list) -> np.ndarray:
+def predict(item, input: list) -> np.ndarray:
     """
     """
-    model_url = package['model_path']
-    image_url = package['file_path']
+    model_url = item.ml_model_path
+    image_url = item.file_path
     add_parent_dir()
     img = load_image(image_url)
     trainer, ontology = create_trainer_object(model_url)
-    update_analysis(package['analysis_id'], completed=False, status="computing")
-    mask_pred = trainer.predict_whole_image(img)
+    update_analysis(item.analysis_id, completed=False, status="computing")
+    mask_pred = trainer.predict_whole_image(img, debug=True)
     # mask_pred = img
     color_coded_mask = plot_save_mask(mask_pred, ontology)
     print("Img: {0} finished".format(image_url))
     return mask_pred, color_coded_mask, ontology
 
 
-def manage_prediction_request(package: dict):
+def manage_prediction_request(item):
 
     try:
-        mask_pred, color_coded_mask, ontology = predict(package=package, input=[])
+        mask_pred, color_coded_mask, ontology = predict(item=item, input=[])
         error = False
-        send_result(color_coded_mask, mask_pred, ontology, package)
-        update_analysis(package['analysis_id'], completed=True, status="processed")
+        send_result(color_coded_mask, mask_pred, ontology, item)
+        update_analysis(item.analysis_id, completed=True, status="processed")
         return {
             "error": error,
         }
@@ -231,7 +228,7 @@ def manage_prediction_request(package: dict):
         print("ERROR:")
         print(e)
         error = True
-        update_analysis(package['analysis_id'], completed=False, error=e)
+        update_analysis(item.analysis_id, completed=False, error=e)
         return {
         "error": error,
     }
