@@ -40,8 +40,8 @@ class Trainer():
             self.load_config()
             self.seed = seed
             # PATHS SERVER
-            self.img_dir = Path(os.path.join(self.yaml_file["img_dir"], str(self.yaml_file["size"])))
-            self.mask_dir = Path(os.path.join(self.yaml_file["mask_dir"], str(self.yaml_file["size"])))
+            self.img_dir = Path(os.path.join(self.yaml_file["img_dir"], str(self.yaml_file["train_img"])))
+            self.mask_dir = Path(os.path.join(self.yaml_file["mask_dir"], str(self.yaml_file["train_mask"])))
             self.exp_dir = Path(os.path.join(self.yaml_file["exp_dir"], "exp_{0}_{1}".format(encoder, self.seed)))
             self.test_dir = Path(os.path.join(self.yaml_file["test_dir"]))
 
@@ -593,7 +593,7 @@ if __name__ == "__main__":
                 trainer.set_paths(train_split=0.9, train=True) # set paths for training
                 trainer.create_dataloaders(augmentations=True) # create dataloaders from image and mask paths
                 trainer.prepare_model() # create Unet object and loss & metric objects and Training/Validation Epoch Runners
-                trainer.train_model(epochs=200) # start training routine using Training/Validation Epoch Runners
+                trainer.train_model(epochs=2000) # start training routine using Training/Validation Epoch Runners
                 trainer.test_model()
     
     elif args.mode == 'test':
