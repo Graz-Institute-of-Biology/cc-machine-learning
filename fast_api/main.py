@@ -33,12 +33,13 @@ class Item:
     analysis_id: int
     parent_img_id: int
     ml_model_id: int
+    debug: bool
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Load the ML model
     logger.info('Running envirnoment: {}'.format(CONFIG['ENV']))
-    logger.info('PyTorch using device: {}'.format(CONFIG['DEVICE']))
+    # logger.info('PyTorch using device: {}'.format(CONFIG['DEVICE']))
     
     q = asyncio.Queue()  # note that asyncio.Queue() is not thread safe
     pool = ProcessPoolExecutor()
@@ -101,7 +102,9 @@ async def do_predict(request: Request, body: InferenceInput, background_tasks: B
                     file_path=body.file_path,
                     analysis_id=body.analysis_id,
                     parent_img_id=body.parent_img_id,
-                    ml_model_id=body.ml_model_id)
+                    ml_model_id=body.ml_model_id,
+                    debug=body.debug
+                    )
         
         background_tasks.add_task(request.state.q.put_nowait, item)
 

@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 
 import os
-# import torch
 
 
 # Config that serves all environment
@@ -19,7 +18,8 @@ ENV_CONFIG = {
     },
 
     "staging": {
-        "DEBUG": True
+        "DEBUG": True,
+        "HOST": "django", # default "localhost", "django" if using docker
     },
 
     "production": {
@@ -36,8 +36,9 @@ def get_config() -> dict:
     """
 
     # Determine running environment
-    ENV = os.environ['PYTHON_ENV'] if 'PYTHON_ENV' in os.environ else 'development'
+    ENV = os.environ['ML_ENV'] if 'ML_ENV' in os.environ else 'development'
     ENV = ENV or 'development'
+    print(ENV)
 
     # raise error if environment is not expected
     if ENV not in ENV_CONFIG:
@@ -47,7 +48,7 @@ def get_config() -> dict:
     config.update(ENV_CONFIG[ENV])
 
     config['ENV'] = ENV
-    config['DEVICE'] = 'cpu'
+    # config['DEVICE'] = 'cpu'
 
     return config
 

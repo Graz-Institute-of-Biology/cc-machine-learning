@@ -55,7 +55,7 @@ def get_image(img_id):
     decoded = json.loads(encoded.decode())
     return decoded
 
-def get_class_distributions(img, ontology, ignore_zero=True):
+def get_class_distributions(img, ontology, ignore_zero=True, debug=False):
     """
     Get class distributions from image
     if ignore_zero is True, ignore class 0 (Background) and calculate distribution
@@ -74,8 +74,16 @@ def get_class_distributions(img, ontology, ignore_zero=True):
     class_names = list(ontology.keys())
     
     # set all class distributions to 0
-    for key in class_distributions:
-        class_distributions[key] = 0
+    if not debug:
+        class_distributions = dict(zip(class_distributions, np.zeros(len(class_distributions))))
+
+    # for debugging set random class distributions
+    elif debug:
+        random_vals = np.random.random(len(class_distributions))
+        random_vals = random_vals/np.sum(random_vals)
+        class_distributions = dict(zip(class_distributions, random_vals))
+        # for key in enumerate(class_distributions):
+        #     class_distributions[key] = np.random.rand()
 
     unique, counts = np.unique(img, return_counts=True)
     denom = np.sum(counts[1:])
@@ -101,7 +109,8 @@ def send_result(color_coded_img, categorically_coded_img, ontology, item):
     parent_file_url = item.file_path
     parent_img_id = item.parent_img_id
     ml_model_id = item.ml_model_id
-    class_distributions = get_class_distributions(categorically_coded_img, ontology)
+    debug = item.debug
+    class_distributions = get_class_distributions(categorically_coded_img, ontology, debug=debug)
 
     image_data = get_image(parent_img_id)
     dataset = image_data['dataset']
@@ -222,9 +231,10 @@ def predict(item, debug) -> np.ndarray:
     return mask_pred, ontology
 
 
-def manage_prediction_request(item, debug=False):
+def manage_prediction_request(item):
 
     try:
+        debug = item.debug
         update_analysis(item.analysis_id, completed=False, status="processing")
         mask_pred, ontology = predict(item=item, debug=debug)
         color_coded_mask = plot_save_mask(mask_pred, ontology)

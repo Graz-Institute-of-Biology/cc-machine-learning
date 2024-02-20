@@ -15,6 +15,7 @@ class InferenceInput(BaseModel):
     analysis_id: int = Field(..., example=1, title='Analysis ID')
     parent_img_id: int = Field(..., example=1, title='Parent Image ID')
     ml_model_id: int = Field(..., example=1, title='ML Model ID')
+    debug: bool = Field(False, example=False, title='Whether to run in debug mode')
 
 class InferenceResult(BaseModel):
     """
