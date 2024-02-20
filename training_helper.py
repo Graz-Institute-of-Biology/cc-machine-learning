@@ -4,12 +4,12 @@ import albumentations as albu
 def get_training_augmentation(min_height=1024, min_width=1024):
     train_transform = [
 
+        albu.RandomCrop(height=min_height, width=min_width, always_apply=True),
+        albu.PadIfNeeded(min_height=min_height, min_width=min_width, always_apply=True, border_mode=0),
         albu.HorizontalFlip(p=0.5),
 
         albu.ShiftScaleRotate(scale_limit=0.1, rotate_limit=45, shift_limit=0.1, p=1, border_mode=0),
 
-        albu.PadIfNeeded(min_height=min_height, min_width=min_width, always_apply=True, border_mode=0),
-        # albu.RandomCrop(height=320, width=320, always_apply=True),
 
         # albu.IAAAdditiveGaussianNoise(p=0.2),
         albu.IAAPerspective(p=0.5),
@@ -46,6 +46,7 @@ def get_training_augmentation(min_height=1024, min_width=1024):
 def get_validation_augmentation(min_height=1024, min_width=1024):
     """Add paddings to make image shape divisible by 32"""
     test_transform = [
+        albu.RandomCrop(height=min_height, width=min_width, always_apply=True),
         albu.PadIfNeeded(min_height=min_height, min_width=min_width)
     ]
     return albu.Compose(test_transform)
