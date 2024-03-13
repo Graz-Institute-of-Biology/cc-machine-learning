@@ -2,6 +2,7 @@ import os
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 # import keras.backend as K
 # K.set_image_data_format('channels_first')
+
 import numpy as np
 import cv2
 import matplotlib.pyplot as plt
@@ -237,7 +238,7 @@ class Trainer():
             verbose=True,
         )
 
-    def save_model(self, epoch):
+    def save_model(self, epoch, update_latest=False):
         """save model to model_save_path (experiment folder + best_model.pth)
         train/valid dataloaders seem to need a lot of memory and are not saved in the model
         """
@@ -249,9 +250,15 @@ class Trainer():
             'epoch': epoch,
             'ontology' : self.ontology,
         }
-        torch.save(ckpt_dict, self.model_save_path)
+        if not update_latest:
+            torch.save(ckpt_dict, self.model_save_path)
+        else:
+            save_path = os.path.join(self.exp_dir, 'latest_model.pth')
+            torch.save(ckpt_dict, save_path)
+        
+        print("Model updated!")
 
-    def train_model(self, epochs=1):
+    def train_model(self, epochs=1, save_every=10):
 
         print("Training on {0} images".format(len(self.images_fps)))
         max_score = 0
@@ -268,12 +275,14 @@ class Trainer():
             
             # do something (save model, change lr, etc.)
             if max_score < self.valid_logs['iou_score']:
+                print('New top score: {0} > {1} '.format(self.valid_logs['iou_score'], max_score))
                 max_score = self.valid_logs['iou_score']
                 # torch.save(self.model, self.model_save_path)
                 self.save_model(epoch=i)
+                self.save_loss_plots()
 
-                print('Model saved!')
-
+            if (i+1)%save_every == 0:
+                self.save_model(epoch=i, update_latest=True)
                 self.save_loss_plots()
                 
             # if (i+1)%25 == 0:
@@ -566,7 +575,6 @@ class Trainer():
             self.save_output_mask(whole_mask, img_name)
             
 
-
 def parse_args():
     parser = argparse.ArgumentParser(description='Train or test segmentation model')
     parser.add_argument('--mode', default='predict', type=str, help='mode: "train" for training model \n "test" for testing with ground truth and save results to pdf file \n "predict" for predicting whole images and save prediction mask', required=False)
@@ -611,3 +619,4 @@ if __name__ == "__main__":
         trainer = Trainer(encoder=encoder, seed=seeds[0], pred=True)
         trainer.set_paths(pred=True)
         trainer.predict()
+
