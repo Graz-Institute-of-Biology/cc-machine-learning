@@ -6,7 +6,7 @@ import os
 
 # Config that serves all environment
 GLOBAL_CONFIG = {
-    "HOST": "localhost", # default "localhost", "django" if using docker
+    "HOST": "http://localhost:8000", # default "localhost", "django" if using docker
     "USE_CUDA_IF_AVAILABLE": True,
     "ROUND_DIGIT": 6
 }
@@ -14,16 +14,17 @@ GLOBAL_CONFIG = {
 # Environment specific config, or overwrite of GLOBAL_CONFIG
 ENV_CONFIG = {
     "development": {
-        "DEBUG": True
+        "DEBUG": True,
     },
 
     "staging": {
         "DEBUG": True,
-        "HOST": "django", # default "localhost", "django" if using docker
+        "HOST": "https://api.cc-explorer.com", # default "localhost", "django" if using docker
     },
 
     "production": {
         "DEBUG": False,
+        "HOST": "https://api.cc-explorer.com", # default "localhost", "django" if using docker
         "ROUND_DIGIT": 3
     }
 }

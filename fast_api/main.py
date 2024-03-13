@@ -23,6 +23,8 @@ from exception_handler import validation_exception_handler, python_exception_han
 from concurrent.futures import ProcessPoolExecutor
 import asyncio
 from dataclasses import dataclass
+from fastapi.middleware.cors import CORSMiddleware
+
 
 
 @dataclass
@@ -33,6 +35,8 @@ class Item:
     analysis_id: int
     parent_img_id: int
     ml_model_id: int
+    dataset_id: int
+    token: str
     debug: bool
 
 @asynccontextmanager
@@ -58,8 +62,17 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Allow CORS for local debugging
-app.add_middleware(CORSMiddleware, allow_origins=["*"])
+
+if CONFIG['ENV'] == 'development':
+    origins = [ CONFIG['HOST'] ]
+    print(origins)
+    app.add_middleware(CORSMiddleware, allow_origins=origins)
+elif CONFIG['ENV'] == 'staging':
+    origins = [ CONFIG['HOST'] ]
+    app.add_middleware(CORSMiddleware, allow_origins=origins)
+elif CONFIG['ENV'] == 'production':
+    origins = [ CONFIG['HOST'] ]
+    app.add_middleware(CORSMiddleware, allow_origins=origins)
 
 # Mount static folder, like demo pages, if any
 # app.mount("/static", StaticFiles(directory="static/"), name="static")
@@ -94,8 +107,6 @@ async def do_predict(request: Request, body: InferenceInput, background_tasks: B
     """
 
     try:
-        update_analysis(body.analysis_id, completed=False, status="Received/Queued")
-
         item_id = str(body.analysis_id)
         item = Item(id=item_id,
                     ml_model_path=body.ml_model_path,
@@ -103,9 +114,11 @@ async def do_predict(request: Request, body: InferenceInput, background_tasks: B
                     analysis_id=body.analysis_id,
                     parent_img_id=body.parent_img_id,
                     ml_model_id=body.ml_model_id,
-                    debug=body.debug
+                    debug=body.debug,
+                    dataset_id=body.dataset_id,
+                    token=body.token
                     )
-        
+        update_analysis(body.analysis_id, completed=False, status="Received/Queued")
         background_tasks.add_task(request.state.q.put_nowait, item)
 
         return {"error": False}

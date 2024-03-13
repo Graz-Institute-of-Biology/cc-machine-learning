@@ -25,11 +25,11 @@ import numpy as np
 
 # print(CONFIG)
 
-def update_analysis(analysis_id, status=None, completed=True, error=""):
+def update_analysis(analysis_id, token=None, status=None, completed=True, error=""):
     """update analysis entry in django backend
     """
     # analyses_url = 'http://django:8000/api/v1/analyses/{0}/'.format(str(analysis_id)) #localhost:8000 or django:8000 (if using docker)
-    analyses_url = 'http://{0}:8000/api/v1/analyses/{1}/'.format(CONFIG["HOST"], str(analysis_id)) #localhost:8000 or django:8000 (if using docker)
+    analyses_url = '{0}/api/v1/analyses/{1}/'.format(CONFIG["HOST"], str(analysis_id)) #localhost:8000 or django:8000 (if using docker)
 
     payload = {
         "completed" : completed,
@@ -40,7 +40,8 @@ def update_analysis(analysis_id, status=None, completed=True, error=""):
         payload["status"] = status
 
     print("sending analysis-PATCH-request...")
-    response = requests.patch(analyses_url, data=payload)
+    header = {"Authorization":"Token {0}".format(token)}
+    response = requests.patch(analyses_url, data=payload, headers=header)
     print("done")
 
 def get_image(img_id):
@@ -48,7 +49,7 @@ def get_image(img_id):
     Get image from django backend
     """
     # image_url = 'http://django:8000/api/v1/images/{0}/'.format(img_id) #localhost:8000 or django:8000 (if using docker)
-    image_url = 'http://{0}:8000/api/v1/images/{1}/'.format(CONFIG["HOST"], img_id) #localhost:8000 or django:8000 (if using docker)
+    image_url = '{0}/api/v1/images/{1}/'.format(CONFIG["HOST"], img_id) #localhost:8000 or django:8000 (if using docker)
 
     response = requests.get(image_url)
     encoded = response.content
@@ -112,8 +113,8 @@ def send_result(color_coded_img, categorically_coded_img, ontology, item):
     debug = item.debug
     class_distributions = get_class_distributions(categorically_coded_img, ontology, debug=debug)
 
-    image_data = get_image(parent_img_id)
-    dataset = image_data['dataset']
+    # image_data = get_image(parent_img_id)
+    dataset = item.dataset_id
     
     img_byte_arr = io.BytesIO()
     color_coded_img.save(img_byte_arr, format='png')
@@ -133,7 +134,8 @@ def send_result(color_coded_img, categorically_coded_img, ontology, item):
     file = {'mask': ('image.jpg', img_byte_arr.getvalue(), 'image/png')}
     
     print("sending mask-POST-request...")
-    mask_api_url = 'http://{0}:8000/api/v1/masks/'.format(CONFIG["HOST"]) #localhost:8000 or django:8000 (if using docker)
+    mask_api_url = '{0}/api/v1/masks/'.format(CONFIG["HOST"]) #localhost:8000 or django:8000 (if using docker)
+    header = {"Authorization":"Token {0}".format(item.token)}
     response = requests.post(mask_api_url, data=payload, files=file)
     print("done")
 
@@ -235,12 +237,12 @@ def manage_prediction_request(item):
 
     try:
         debug = item.debug
-        update_analysis(item.analysis_id, completed=False, status="processing")
+        update_analysis(item.analysis_id, item.token, completed=False, status="processing")
         mask_pred, ontology = predict(item=item, debug=debug)
         color_coded_mask = plot_save_mask(mask_pred, ontology)
-        update_analysis(item.analysis_id, completed=True, status="processed/sending result")
+        update_analysis(item.analysis_id, item.token, completed=True, status="processed/sending result")
         send_result(color_coded_mask, mask_pred, ontology, item)
-        update_analysis(item.analysis_id, completed=True, status="processed & saved")
+        update_analysis(item.analysis_id, item.token, completed=True, status="processed & saved")
         return {
             "error": False,
         }
