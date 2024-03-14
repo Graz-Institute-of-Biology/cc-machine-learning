@@ -136,7 +136,7 @@ def send_result(color_coded_img, categorically_coded_img, ontology, item):
     print("sending mask-POST-request...")
     mask_api_url = '{0}/api/v1/masks/'.format(CONFIG["HOST"]) #localhost:8000 or django:8000 (if using docker)
     header = {"Authorization":"Token {0}".format(item.token)}
-    response = requests.post(mask_api_url, data=payload, files=file)
+    response = requests.post(mask_api_url, data=payload, files=file, headers=header)
     print("done")
 
     pass
@@ -250,7 +250,7 @@ def manage_prediction_request(item):
             print("ERROR:")
             error = traceback.format_exc()
             print(error)
-            update_analysis(item.analysis_id, completed=False, error=error)
+            update_analysis(item.analysis_id, item.token, completed=False, error=error)
             return {
             "error": True,
         }

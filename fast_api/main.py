@@ -118,7 +118,7 @@ async def do_predict(request: Request, body: InferenceInput, background_tasks: B
                     dataset_id=body.dataset_id,
                     token=body.token
                     )
-        update_analysis(body.analysis_id, completed=False, status="Received/Queued")
+        update_analysis(analysis_id=body.analysis_id, token=body.token, completed=False, status="Received/Queued")
         background_tasks.add_task(request.state.q.put_nowait, item)
 
         return {"error": False}
@@ -126,7 +126,7 @@ async def do_predict(request: Request, body: InferenceInput, background_tasks: B
         error = traceback.format_exc()
         print("ERROR:")
         print(error)
-        update_analysis(body.analysis_id, completed=False, error=error)
+        update_analysis(analysis_id=body.analysis_id, token=body.token, completed=False, status="Error", error=error)
         return {"error": True}
 
 
