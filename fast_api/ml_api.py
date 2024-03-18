@@ -235,6 +235,7 @@ def predict(item, debug) -> np.ndarray:
 
 def manage_prediction_request(item):
     print("HOST: ", CONFIG["HOST"])
+    print("ITEM: ", item)
     try:
         debug = item.debug
         update_analysis(item.analysis_id, item.token, completed=False, status="processing")
