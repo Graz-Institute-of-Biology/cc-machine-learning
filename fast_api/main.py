@@ -86,7 +86,6 @@ async def process_requests(q: asyncio.Queue, pool: ProcessPoolExecutor):
         item = await q.get()
         loop = asyncio.get_running_loop()
         print("Processing")
-        print(item)
         r = await loop.run_in_executor(pool, manage_prediction_request, item)
         q.task_done()
 
