@@ -106,6 +106,7 @@ async def do_predict(request: Request, body: InferenceInput, background_tasks: B
     """
 
     try:
+        print("Received request...")
         item_id = str(body.analysis_id)
         item = Item(id=item_id,
                     ml_model_path=body.ml_model_path,
