@@ -42,7 +42,7 @@ class Item:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Load the ML model
-    logger.info('Running envirnoment: {}'.format(CONFIG['ENV']))
+    logger.info('Running envirnoment prody: {}'.format(CONFIG['ENV']))
     # logger.info('PyTorch using device: {}'.format(CONFIG['DEVICE']))
     
     q = asyncio.Queue()  # note that asyncio.Queue() is not thread safe
