@@ -104,9 +104,9 @@ async def do_predict(request: Request, body: InferenceInput, background_tasks: B
     file_path: str = Field(..., example='12/images/img_1.jpg', title='Path to the input image file')
     model_path: str = Field(..., example='12/models/model_1.pt', title='Path to the model file')
     """
+    logger.info('Handling request: {}'.format(body))
 
     try:
-        print("Received request...")
         item_id = str(body.analysis_id)
         item = Item(id=item_id,
                     ml_model_path=body.ml_model_path,
@@ -123,11 +123,13 @@ async def do_predict(request: Request, body: InferenceInput, background_tasks: B
 
         return {"error": False}
     except Exception as e:
+        logger.info('ERROR: {}'.format(e))
         error = traceback.format_exc()
         print("ERROR:")
         print(error)
         update_analysis(analysis_id=body.analysis_id, token=body.token, completed=False, status="Error", error=error)
         return {"error": True}
+
 
 
 @app.get('/about')
