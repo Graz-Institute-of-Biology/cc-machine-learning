@@ -38,6 +38,7 @@ class Item:
     dataset_id: int
     token: str
     debug: bool
+    num_classes: int
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -65,7 +66,7 @@ app = FastAPI(
 
 if CONFIG['ENV'] == 'development':
     origins = [ CONFIG['HOST'] ]
-    print(origins)
+    # print(origins)
     app.add_middleware(CORSMiddleware, allow_origins=origins)
 elif CONFIG['ENV'] == 'staging':
     origins = [ CONFIG['HOST'] ]
@@ -105,6 +106,7 @@ async def do_predict(request: Request, body: InferenceInput, background_tasks: B
     model_path: str = Field(..., example='12/models/model_1.pt', title='Path to the model file')
     """
     logger.info('Handling request: {}'.format(body))
+    print("Handling request: {}".format(body))
 
     try:
         item_id = str(body.analysis_id)
@@ -116,7 +118,8 @@ async def do_predict(request: Request, body: InferenceInput, background_tasks: B
                     ml_model_id=body.ml_model_id,
                     debug=body.debug,
                     dataset_id=body.dataset_id,
-                    token=body.token
+                    token=body.token,
+                    num_classes=body.num_classes
                     )
         update_analysis(analysis_id=body.analysis_id, token=body.token, completed=False, status="Received/Queued")
         background_tasks.add_task(request.state.q.put_nowait, item)

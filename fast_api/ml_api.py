@@ -11,7 +11,7 @@ import os
 import sys
 import cv2
 import io
-from PIL import Image
+from PIL import Image, ImageColor
 from requests_toolbelt.multipart.encoder import MultipartEncoder
 from datetime import datetime
 import matplotlib
@@ -56,6 +56,24 @@ def get_image(img_id):
     decoded = json.loads(encoded.decode())
     return decoded
 
+def check_color(color):
+    if color[0] == "#":
+        return ImageColor.getrgb(color)
+    else:
+        return color
+
+def get_class_color_dict(ontology):
+
+    class_color_dict = {}
+    for i, key in enumerate(ontology.keys()):
+        # if key == "background":
+        #     print("Ignoring class 'background'...")
+        #     continue
+        rgb_color = check_color(ontology[key])
+        class_color_dict[i] = {"name": key, "color": rgb_color}
+
+    return class_color_dict
+
 def get_class_distributions(img, ontology, ignore_zero=True, debug=False):
     """
     Get class distributions from image
@@ -73,10 +91,15 @@ def get_class_distributions(img, ontology, ignore_zero=True, debug=False):
 
     class_distributions = ontology.copy()
     class_names = list(ontology.keys())
+
+    if class_names[0] == "0":
+        class_names = [class_distributions[key]["name"] for key in class_distributions]
+
+    print(class_distributions)
     
     # set all class distributions to 0
     if not debug:
-        class_distributions = dict(zip(class_distributions, np.zeros(len(class_distributions))))
+        class_distributions = dict(zip(class_names, np.zeros(len(class_names))))
 
     # for debugging set random class distributions
     elif debug:
@@ -95,8 +118,8 @@ def get_class_distributions(img, ontology, ignore_zero=True, debug=False):
         name = class_names[class_code]
         class_distributions[name] = round(counts[i]/denom, 5)
 
-    del class_distributions['background']
-    class_distributions = str(class_distributions)
+    # del class_distributions['background']
+    # class_distributions = str(class_distributions)
     print("Class Dist.:")
     print(class_distributions)
     return class_distributions
@@ -112,6 +135,11 @@ def send_result(color_coded_img, categorically_coded_img, ontology, item):
     ml_model_id = item.ml_model_id
     debug = item.debug
     class_distributions = get_class_distributions(categorically_coded_img, ontology, debug=debug)
+    if not list(ontology.keys())[0] == "0":
+        class_color_dict = get_class_color_dict(ontology)
+    else:
+        class_color_dict = ontology
+    class_distributions = json.dumps({"class_distributions": class_distributions, "class_colors": class_color_dict})
 
     # image_data = get_image(parent_img_id)
     dataset = item.dataset_id
@@ -137,16 +165,31 @@ def send_result(color_coded_img, categorically_coded_img, ontology, item):
     mask_api_url = '{0}/api/v1/masks/'.format(CONFIG["HOST"]) #localhost:8000 or django:8000 (if using docker)
     header = {"Authorization":"Token {0}".format(item.token)}
     response = requests.post(mask_api_url, data=payload, files=file, headers=header)
-    print("done")
+    print("Done")
 
     pass
+
+def get_hex_from_dict(ontology):
+    class_values = ontology.keys()
+    colors_hex = []
+    for key in class_values:
+        color_rgb = ontology[key]["color"]
+        color_rgb = np.array(color_rgb)/255
+        color_hex = matplotlib.colors.rgb2hex(color_rgb)
+        colors_hex.append(color_hex)
+    
+    return colors_hex
 
 def plot_save_mask(mask, ontology):
 
     print("plot & save results...")
     mask = np.array(mask)
     labels = list(ontology.keys())
-    colors_hex = list(ontology.values())
+    if list(ontology.keys())[0] == "0":
+        print("GET HEX FROM DICT")
+        colors_hex = get_hex_from_dict(ontology)
+    else:
+        colors_hex = list(ontology.values())
 
     # colors_hex = ["#000000","#1cffbb", "#00bcff","#0059ff", "#2601d8", "#ff00c3", "#FF4A46", "#ff7500", "#928e00"]
     col = ListedColormap(colors_hex)
@@ -176,15 +219,15 @@ def plot_save_mask(mask, ontology):
     
     return pil_img
 
-def prepare_load_model(model_url):
+def prepare_load_model(model_url, num_classes):
     encoder = 'mit_b5'
     encoder_weights = 'imagenet'
     activation = 'sigmoid'
-    class_values = [0, 1, 2, 3, 4, 5, 6, 7, 8]
+    # class_values = [0, 1, 2, 3, 4, 5, 6, 7, 8]
     model = smp.Unet(
         encoder_name=encoder, 
         encoder_weights=encoder_weights, 
-        classes=len(class_values), 
+        classes=num_classes, 
         activation=activation,
     )
 
@@ -192,9 +235,16 @@ def prepare_load_model(model_url):
     # print(response.content)
     checkpoint = torch.load(BytesIO(response.content), map_location=torch.device('cpu'))
     ontology = checkpoint['ontology']
+    print("Using ontology: ", ontology)
+    crop_size = None
+    try:
+        crop_size = checkpoint['grid_size']
+    except KeyError:
+        print("No crop size found in checkpoint, using default crop size:")
+
     model.load_state_dict(checkpoint['model_state_dict'])
 
-    return model, ontology
+    return model, ontology, crop_size
 
 def add_parent_dir():
     currentdir = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
@@ -207,15 +257,18 @@ def load_image(image_url):
     img = Image.open(BytesIO(response.content))
     return img
 
-def create_trainer_object(model_url):
+def create_trainer_object(model_url, num_classes):
     from train_smp import Trainer
     encoder = 'mit_b5'
     print("Creating trainer object...")
     trainer = Trainer(encoder=encoder, load_config=False, device='cpu')
     print("Done")
     print("Loading model...")
-    model, ontology = prepare_load_model(model_url)
+    model, ontology, crop_size = prepare_load_model(model_url, num_classes)
     trainer.model = model
+    trainer.class_values = list(np.arange(num_classes))
+    if crop_size:
+        trainer.size = crop_size
     print("Done")
     return trainer, ontology
 
@@ -224,9 +277,10 @@ def predict(item, debug) -> np.ndarray:
     """
     model_url = item.ml_model_path
     image_url = item.file_path
+    num_classes = item.num_classes
     add_parent_dir()
     img = load_image(image_url)
-    trainer, ontology = create_trainer_object(model_url)
+    trainer, ontology = create_trainer_object(model_url, num_classes)
     mask_pred = trainer.predict_whole_image(img, debug=debug)
     # mask_pred = img
     print("Img: {0} finished".format(image_url))

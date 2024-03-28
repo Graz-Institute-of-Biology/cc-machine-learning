@@ -488,6 +488,7 @@ class Trainer():
         """
 
         x_tensor = torch.from_numpy(img).to(self.device).unsqueeze(0)
+        self.model.eval()
         pr_mask = self.model.predict(x_tensor)
         pr_mask = (pr_mask.squeeze().cpu().numpy().round())
         pr_mask = pr_mask.transpose(1, 2, 0)
