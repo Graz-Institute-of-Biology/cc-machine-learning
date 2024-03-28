@@ -31,6 +31,7 @@ def update_analysis(analysis_id, token=None, status=None, completed=True, error=
     # analyses_url = 'http://django:8000/api/v1/analyses/{0}/'.format(str(analysis_id)) #localhost:8000 or django:8000 (if using docker)
     analyses_url = '{0}/api/v1/analyses/{1}/'.format(CONFIG["HOST"], str(analysis_id)) #localhost:8000 or django:8000 (if using docker)
 
+    print("URL: ", analyses_url)
     payload = {
         "completed" : completed,
         "errors" : error,
@@ -42,6 +43,7 @@ def update_analysis(analysis_id, token=None, status=None, completed=True, error=
     print("sending analysis-PATCH-request...")
     header = {"Authorization":"Token {0}".format(token)}
     response = requests.patch(analyses_url, data=payload, headers=header)
+    print(response)
     print("done")
 
 def get_image(img_id):
