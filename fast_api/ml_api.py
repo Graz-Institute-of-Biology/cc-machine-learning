@@ -223,13 +223,7 @@ def prepare_load_model(model_url, num_classes):
     encoder = 'mit_b5'
     encoder_weights = 'imagenet'
     activation = 'sigmoid'
-    # class_values = [0, 1, 2, 3, 4, 5, 6, 7, 8]
-    model = smp.Unet(
-        encoder_name=encoder, 
-        encoder_weights=encoder_weights, 
-        classes=num_classes, 
-        activation=activation,
-    )
+
 
     response = requests.get(model_url)
     # print(response.content)
@@ -239,8 +233,20 @@ def prepare_load_model(model_url, num_classes):
     crop_size = None
     try:
         crop_size = checkpoint['grid_size']
+        num_classes = checkpoint['num_classes']
+        activation = checkpoint['activation']
+        encoder_weights = checkpoint['encoder_weights']
+        encoder = checkpoint['encoder']
     except KeyError:
-        print("No crop size found in checkpoint, using default crop size:")
+        print("No model settings found in checkpoint, trying default values")
+
+
+    model = smp.Unet(
+        encoder_name=encoder, 
+        encoder_weights=encoder_weights, 
+        classes=num_classes, 
+        activation=activation,
+        )
 
     model.load_state_dict(checkpoint['model_state_dict'])
 
