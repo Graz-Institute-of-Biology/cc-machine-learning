@@ -47,7 +47,7 @@ async def lifespan(app: FastAPI):
     # logger.info('PyTorch using device: {}'.format(CONFIG['DEVICE']))
     
     q = asyncio.Queue()  # note that asyncio.Queue() is not thread safe
-    pool = ProcessPoolExecutor()
+    pool = ProcessPoolExecutor(max_workers=1)
     asyncio.create_task(process_requests(q, pool))  # Start the requests processing task
     yield {'q': q, 'pool': pool}
     pool.shutdown()
@@ -87,7 +87,14 @@ async def process_requests(q: asyncio.Queue, pool: ProcessPoolExecutor):
         item = await q.get()
         loop = asyncio.get_running_loop()
         print("Processing")
-        r = await loop.run_in_executor(pool, manage_prediction_request, item)
+        try:
+            r = await loop.run_in_executor(pool, manage_prediction_request, item)
+            print("Successful ??")
+            print(r)
+        except Exception as e:
+            print("Error")
+            print(e)
+            # update_analysis(analysis_id=item.analysis_id, token=item.token, completed=False, status="Error", error=str(e))
         q.task_done()
 
 
