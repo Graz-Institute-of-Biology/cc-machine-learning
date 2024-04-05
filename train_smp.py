@@ -584,7 +584,7 @@ def parse_args():
 
 if __name__ == "__main__":
     # encoder_list = ['mit_b0', 'efficientnet-b3', 'efficientnet-b7', 'vgg16', 'resnet50']
-    encoder_list = ['mit_b5']
+    encoder_list = ['mit_b3']
     # seeds = [10, 20, 30, 40, 50]
     seeds = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150]
 
