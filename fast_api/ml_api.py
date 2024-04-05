@@ -267,9 +267,19 @@ def load_image(image_url):
 
 def create_trainer_object(model_url, num_classes):
     from train_smp import Trainer
-    encoder = 'mit_b5'
+    encoder_list = ['mit_b5', 'mit_b3', 'mit_b1']
     print("Creating trainer object...")
-    trainer = Trainer(encoder=encoder, load_config=False, device='cpu')
+    trainer = None
+    for encoder in encoder_list:
+        try:
+            trainer = Trainer(encoder=encoder, load_config=False, device='cpu')
+            break
+        except Exception as e:
+            print("Error: ", e)
+            print("Trying next encoder...")
+
+    if not trainer:
+        raise Exception("No encoder found for model: {0}".format(model_url))
     print("Done")
     print("Loading model...")
     model, ontology, crop_size = prepare_load_model(model_url, num_classes)
