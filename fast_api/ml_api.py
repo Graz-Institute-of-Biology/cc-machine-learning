@@ -221,8 +221,7 @@ def plot_save_mask(mask, ontology):
     
     return pil_img
 
-def prepare_load_model(model_url, num_classes):
-    encoder = 'mit_b5'
+def prepare_load_model(model_url, num_classes, encoder='mit_b5'):
     encoder_weights = 'imagenet'
     activation = 'sigmoid'
 
@@ -282,7 +281,8 @@ def create_trainer_object(model_url, num_classes):
         raise Exception("No encoder found for model: {0}".format(model_url))
     print("Done")
     print("Loading model...")
-    model, ontology, crop_size = prepare_load_model(model_url, num_classes)
+    encoder = trainer.encoder
+    model, ontology, crop_size = prepare_load_model(model_url, num_classes, encoder=encoder)
     trainer.model = model
     trainer.class_values = list(np.arange(num_classes))
     if crop_size:
