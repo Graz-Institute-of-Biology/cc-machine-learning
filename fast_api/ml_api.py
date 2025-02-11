@@ -29,7 +29,7 @@ def update_analysis(analysis_id, token=None, status=None, completed=True, error=
     """update analysis entry in django backend
     """
     # analyses_url = 'http://django:8000/api/v1/analyses/{0}/'.format(str(analysis_id)) #localhost:8000 or django:8000 (if using docker)
-    analyses_url = '{0}/api/v1/analyses/{1}/'.format(CONFIG["HOST"], str(analysis_id)) #localhost:8000 or django:8000 (if using docker)
+    analyses_url = '{0}/django/api/v1/analyses/{1}/'.format(CONFIG["HOST"], str(analysis_id)) #localhost:8000 or django:8000 (if using docker)
 
     print("URL: ", analyses_url)
     payload = {
@@ -51,7 +51,7 @@ def get_image(img_id):
     Get image from django backend
     """
     # image_url = 'http://django:8000/api/v1/images/{0}/'.format(img_id) #localhost:8000 or django:8000 (if using docker)
-    image_url = '{0}/api/v1/images/{1}/'.format(CONFIG["HOST"], img_id) #localhost:8000 or django:8000 (if using docker)
+    image_url = '{0}/django/api/v1/images/{1}/'.format(CONFIG["HOST"], img_id) #localhost:8000 or django:8000 (if using docker)
 
     response = requests.get(image_url)
     encoded = response.content
@@ -164,7 +164,7 @@ def send_result(color_coded_img, categorically_coded_img, ontology, item):
     file = {'mask': ('image.jpg', img_byte_arr.getvalue(), 'image/png')}
     
     print("sending mask-POST-request...")
-    mask_api_url = '{0}/api/v1/masks/'.format(CONFIG["HOST"]) #localhost:8000 or django:8000 (if using docker)
+    mask_api_url = '{0}/django/api/v1/masks/'.format(CONFIG["HOST"]) #localhost:8000 or django:8000 (if using docker)
     header = {"Authorization":"Token {0}".format(item.token)}
     response = requests.post(mask_api_url, data=payload, files=file, headers=header)
     print("Done")
