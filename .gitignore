@@ -9,6 +9,7 @@ env.yaml
 /mask_upload
 /configs
 /comp
+/samples
 *.pdf
 *.yaml
 *.pth
