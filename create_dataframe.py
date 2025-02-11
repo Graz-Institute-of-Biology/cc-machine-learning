@@ -52,7 +52,8 @@ def convert_string_to_float(number_string, degree_shift=False):
     return converted
 
 def get_direction_and_height(filename):
-    filename = filename.split('_part')[0] + '.JPG'
+    # filename = filename.split('_part')[0] + '.JPG'
+    filename = filename.split('_mask')[0] + '.JPG'
     print(filename)
     for root, dirs, files in os.walk(ORIG_DATA_DIR):
         if filename in files:
@@ -80,7 +81,10 @@ def read_images_to_dataframe(directory):
     df = pd.DataFrame(columns=['source_file', 'file_name', 'forest_type', 'height', 'direction', 'rel_altitude', 'direction_degrees','habitat_num', 'liverwort', 'moss', 'cyanosliverwort', 'cyanosmoss', 'lichen', 'barkdominated', 'cyanosbark'])
 
     for filename in os.listdir(directory):
-        if "_TF_" in filename and filename.endswith(".png"):
+        if "_C_" in filename and filename.endswith(".png"):
+            print(filename)
+            source_file = filename.split("_mask")[0]
+            print(source_file)
             image_path = os.path.join(directory, filename)
             label = os.path.splitext(filename)[0]
             image = np.array(Image.open(image_path))
@@ -88,8 +92,13 @@ def read_images_to_dataframe(directory):
             forest_type = file_codes[1]
             height = file_codes[2]
             direction = file_codes[3]
-            habitat_number = MICRO_HABITATS[height + direction]
-            source_file = filename.split("_part")[0]
+            try:
+                habitat_number = MICRO_HABITATS[height + direction]
+            except KeyError:
+                print("Habitat {0} not found".format(height + direction))
+                continue
+            # source_file = filename.split("_part")[0]
+
             
             class_counts = np.bincount(image.flatten())[1:]
             class_distributions = np.zeros(len(class_names))
@@ -146,10 +155,11 @@ def combine_subimages(df):
 if __name__ == '__main__':
 
     # path = "C:\\Users\\phili\\Documents\\Work\\PhD - Institut Biologie\\Results\\MaskPredictions"
-    path = "C:\\Users\\faulhamm\\Documents\\Philipp\\training\\partial_masks\\Datasets\\dataset_v9_160imgs_moss_and_habitat_balance"
+    # path = "C:\\Users\\faulhamm\\Documents\\Philipp\\training\\partial_masks\\Datasets\\dataset_v9_160imgs_moss_and_habitat_balance"
+    path = "C:\\Users\\faulhamm\\Documents\\Philipp\\Code\\cc-machine-learning\\test\\atto\\v11_C"
     df = read_images_to_dataframe(path)
     # df.to_pickle('dataframe.pkl')
-    df.to_csv('dist_dataframe_tf_v9.csv')
+    df.to_csv('dist_dataframe_c_v11full.csv')
 
-    df_combined = combine_subimages(df)
-    df_combined.to_csv('dist_dataframe_combined_v9.csv')
+    # df_combined = combine_subimages(df)
+    # df_combined.to_csv('dist_dataframe_combined_v9.csv')

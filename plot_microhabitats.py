@@ -1,5 +1,7 @@
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib
+import numpy as np
 
 MICRO_HABITATS = {
                     "GN" : 0,
@@ -27,17 +29,24 @@ colors_hex = ["#000000",
         "#FFFF00"]
 
 
-SHORT_LABELS = ["Li", "Mo", "CLi", "CMo", "Lich", "Ba", "CBa"]
-HEIGHTS = ["Ground", "Main stem", "Canopy"]
+colors_hex = colors_hex[::-1]
+
+SHORT_LABELS = ["Liv.", "Moss", "CyL.", "CyM.", "Lich.", "Bark", "CyBark"]
+SHORT_LABELS = SHORT_LABELS[::-1]
+
+HEIGHTS = ["Canopy", "Main stem", "Ground"]
+# HEIGHTS = ["Ground", "Canopy"]
+# HEIGHTS = ["Canopy", "Ground"]
+
 DIRECTIONS = ["North", "East", "South", "West"]
 
 def get_dist_per_habitat(df, habitat_number):
     df_habitat = df[df['habitat_num'] == habitat_number]
-    df_habitat = df_habitat.drop(['file_name', 'forest_type', 'height', 'direction', 'habitat_num', 'rel_altitude', 'direction_degrees'], axis=1)
+    df_habitat = df_habitat.drop(['source_file', 'file_name', 'forest_type', 'height', 'direction', 'habitat_num', 'rel_altitude', 'direction_degrees', 'abs_altitude'], axis=1)
 
     # print(df_habitat)
     # Calculate the mean of columns in the DataFrame
-    column_means = df_habitat.mean()
+    column_means = df_habitat.mean()*100 # get mean values in percent
 
     # Print the column means
     # print(column_means.sum())
@@ -45,25 +54,41 @@ def get_dist_per_habitat(df, habitat_number):
 
 def get_dist_per_height(df, height):
     df_height = df[df['height'] == height]
-    df_height = df_height.drop(['file_name', 'forest_type', 'height', 'direction', 'habitat_num'], axis=1)
-    column_means = df_height.mean()
+    df_height = df_height.drop(['source_file', 'file_name', 'forest_type', 'height', 'direction', 'habitat_num', 'rel_altitude', 'direction_degrees', 'abs_altitude'], axis=1)
+    column_means = df_height.mean()*100 # get mean values in percent
+    img_counts = len(df_height)
 
-    print(column_means)
-    return column_means
+    return column_means, img_counts
 
-def plot_heights(df):
-    fig, axes = plt.subplots(1, 3, figsize=(10, 6))
+def plot_heights(df, title):
+    fig, axes = plt.subplots(3, 1, figsize=(3.5, 8))
+    plt.rcParams.update({'font.size': 12})
+
+    fig.suptitle(title)
     habitat_num = 0
     habitat_names = list(MICRO_HABITATS.keys())
-    heights = ["G", "M", "C"]
-    for j in range(3):
-        column_means = get_dist_per_height(df, heights[j])
+    heights = ["C", "M", "G"]
+    # heights = ["C", "G"]
+    positions = [0, 1, 2]
+    # positions = [0, 1]
+
+    for j in positions:
+        print("Height: ", heights[j], "\n")
+        column_means, img_counts = get_dist_per_height(df, heights[j])
+        print("Img counts: ", img_counts)
+        column_means = column_means[::-1]
         print(column_means)
-        axes[j].set_title(HEIGHTS[habitat_num])
-        axes[j].bar(SHORT_LABELS, column_means.values)
-        axes[j].set_ylim([0, 1])
-        axes[j].set_ylabel('Class distribution [%]')
-        axes[j].set_xlabel('Classes')
+        print(HEIGHTS)
+        title_string = HEIGHTS[habitat_num] + " (n=" + str(img_counts) + ")"
+        axes[j].set_title(title_string)
+        axes[j].barh(SHORT_LABELS, column_means, color=colors_hex[1:])
+        axes[j].set_xlim([0, 100])
+        # axes[j].set_ylim([0, 100])
+        axes[j].set_xlabel('Class distribution [%]', fontsize=20)
+        axes[j].set_ylabel('Classes', fontsize=20)
+        axes[j].grid()
+        for i in range(len(column_means)):
+            axes[j].annotate("{:.2f}%".format(column_means[i]), xy=(column_means[i]+3, SHORT_LABELS[i]), ha='center', va='center')
 
         habitat_num += 1
 
@@ -71,15 +96,28 @@ def plot_heights(df):
     plt.show()
 
 def get_dist_per_direction(df, direction):
+    """ calculate the distribution of classes for a given direction
+
+    Args:
+        df (pandas dataframe): pandas dataframe containing the data
+        direction (str): direction info [N, E, S, W]
+
+    Returns:
+        numpy array: mean values of the classes in percent (0-100)
+    """
     df_direction = df[df['direction'] == direction]
-    df_direction = df_direction.drop(['file_name', 'forest_type', 'height', 'direction', 'habitat_num', 'rel_altitude', 'direction_degrees'], axis=1)
-    column_means = df_direction.mean()
+    df_direction = df_direction.drop(['source_file', 'file_name', 'forest_type', 'height', 'direction', 'habitat_num', 'rel_altitude', 'direction_degrees', 'abs_altitude'], axis=1)
+    column_means = df_direction.mean()*100 # get mean values in percent
 
     print(column_means)
     return column_means
 
 def plot_directions(df):
     fig, axes = plt.subplots(1, 4, figsize=(10, 6))
+    plt.rcParams.update({'font.size': 10})
+    fig.suptitle(title, fontsize=30)
+
+
     habitat_num = 0
     habitat_names = list(MICRO_HABITATS.keys())
     directions = ["N", "E", "S", "W"]
@@ -87,12 +125,16 @@ def plot_directions(df):
         column_means = get_dist_per_direction(df, directions[j])
         print(column_means)
         axes[j].set_title(DIRECTIONS[habitat_num])
-        axes[j].bar(SHORT_LABELS, column_means.values)
-        axes[j].set_ylim([0, 1])
-        axes[j].set_ylabel('Class distribution [%]')
-        axes[j].set_xlabel('Classes')
+        axes[j].bar(SHORT_LABELS, column_means.values, color=colors_hex[1:])
+        axes[j].set_ylim([0, 100])
+        axes[j].set_ylabel('Class distribution [%]', fontsize=20)
+        axes[j].set_xlabel('Classes', fontsize=20)
+
+        for i in range(len(column_means)):
+            axes[j].annotate("{:.2f}%".format(column_means[i]), xy=(SHORT_LABELS[i],column_means[i]), ha='center', va='bottom')
 
         habitat_num += 1
+        axes[j].grid()
 
     plt.tight_layout()
     plt.show()
@@ -110,21 +152,66 @@ def plot_all_micro_habitats(df):
             print(column_means)
             axes[pos_h, pos_w].set_title(habitat_names[habitat_num])
             axes[pos_h, pos_w].bar(SHORT_LABELS, column_means.values, color=colors_hex[1:])
-            axes[pos_h, pos_w].set_ylim([0, 1])
+            axes[pos_h, pos_w].set_ylim([0, 100])
             axes[pos_h, pos_w].set_ylabel('Class distribution [%]')
             axes[pos_h, pos_w].set_xlabel('Classes')
 
             habitat_num += 1
+            axes[pos_h, pos_w].grid()
 
     plt.tight_layout()
     plt.show()
 
 
-file_path = "dist_dataframe_v9.csv"
+def plot_overall_(df, title):
+
+
+    fig, axes = plt.subplots(1, 1, figsize=(10, 6))
+    plt.rcParams.update({'font.size': 30})
+    fig.suptitle(title)
+    df = df.drop(['source_file', 'file_name', 'forest_type', 'height', 'direction', 'habitat_num', 'rel_altitude', 'direction_degrees', 'abs_altitude'], axis=1)
+    column_means = df.mean()*100
+    axes.set_ylim([0, 100])
+    
+    # matplotlib.rc('xtick', labelsize=30) 
+    # matplotlib.rc('ytick', labelsize=30)
+    # matplotlib.rc('axes', titlesize=30)
+    # matplotlib.rc('axes', labelsize=30)
+
+    plt.xlabel('Classes', fontsize=30)
+    plt.ylabel('Class distribution [%]', fontsize=30)
+    axes.yaxis.set_tick_params(labelsize='small')
+    axes.xaxis.set_tick_params(labelsize='small')
+
+    axes.bar(SHORT_LABELS, column_means.values, color=colors_hex[1:])
+    for i in range(len(column_means)):
+        plt.annotate("{:.2f}%".format(column_means[i]), xy=(SHORT_LABELS[i],column_means[i]), ha='center', va='bottom')
+
+
+
+
+
+
+    
+    plt.tight_layout()
+    plt.grid()
+    plt.show()
+
+
+# file_path = "dist_dataframe_dummy.csv"
+# title = "Coverage distribution of example image"
+
+# file_path = "dist_dataframe_c_v11full.csv"
+# title = "Coverage distribution across heights in Campina"
+
+file_path = "dist_dataframe_tf_v11full.csv"
+title = "Coverage distribution across heights of Terra Firme"
 
 df = pd.read_csv(file_path, index_col=0)
+print(len(df))
 # print(df)
 
-plot_all_micro_habitats(df)
-# plot_heights(df)
+# plot_all_micro_habitats(df)
+plot_heights(df, title=title)
 # plot_directions(df)
+# plot_overall_(df, title=title)
