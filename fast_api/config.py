@@ -24,7 +24,7 @@ ENV_CONFIG = {
 
     "production": {
         "DEBUG": False,
-        "HOST": "https://api.cc-explorer.com", # default "localhost", "django" if using docker
+        "HOST": "https://it245151.uni-graz.at", # default "localhost", "django" if using docker
         "ROUND_DIGIT": 3
     }
 }
