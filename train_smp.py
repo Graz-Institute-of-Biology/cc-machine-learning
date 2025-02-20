@@ -26,7 +26,7 @@ import argparse
 import uuid
 from training_helper import get_preprocessing, get_training_augmentation, get_validation_augmentation
 ssl._create_default_https_context = ssl._create_unverified_context
-
+import json
 
 
 class Trainer():
@@ -35,15 +35,26 @@ class Trainer():
     for predicting images
     """
 
-    def __init__(self, encoder='efficientnet-b3', encoder_weights='imagenet', seed=10, load_config=True, device='cuda', size=1024, pred=False, active_learning=False, save_val_uncertainty=False, ontology="atto"):
+    def __init__(self, 
+                 encoder='efficientnet-b3', 
+                 encoder_weights='imagenet', 
+                 seed=10,
+                 load_config=True,
+                 device='cuda', 
+                 size=1024, 
+                 pred=False, 
+                 active_learning=False, 
+                 save_val_uncertainty=False,
+                 config_file="None", ):
 
         self.size = size
         self.pred = pred
         self.seed = seed
-        self.ontology = ontology
         self.active_learning=active_learning
         self.save_val_uncertainty = save_val_uncertainty
         self.ignore_background = True
+        self.config_file = config_file
+        self.device = device
 
         if self.active_learning:
             self.save_val_uncertainty = True
@@ -55,13 +66,12 @@ class Trainer():
         # model settings
         self.encoder = encoder
         self.encoder_weights = encoder_weights
-        self.set_ontology()
+        self.load_ontology()
         
-        self.class_values = list(self.class_dict.values())
-        self.labels = list(self.class_dict.keys())
+        self.class_values = [d["value"] for d in self.ontology["ontology"].values()]
+        self.labels = list(self.ontology["ontology"].keys())
         
         self.activation = 'softmax2d'
-        self.device = device
         self.lr_count = 0
         self.train_batch_size = 1
         self.val_batch_size = 1
@@ -72,63 +82,87 @@ class Trainer():
         self.preprocessing_fn = smp.encoders.get_preprocessing_fn(self.encoder, self.encoder_weights)
         self.preprocessing = get_preprocessing(self.preprocessing_fn)
 
-    def set_ontology(self):
+    def load_ontology(self):
         """set ontologies, should be moved to separate file!!!
         """
-        if self.ontology == "atto":
-            self.class_dict = {	    "background" : 0,
-                                    "liverwort" : 1,
-                                    "moss" : 2,
-                                    "cyanosliverwort" : 3,
-                                    "cyanosmoss" : 4,
-                                    "lichen" : 5,
-                                    "barkdominated" : 6,
-                                    "cyanosbark" : 7,
-                                    "other" : 8,
-                                }
-            self.ontology = {	    "background" : "#000000",
-                                    "liverwort" : "#1cffbb",
-                                    "moss" : "#00bcff",
-                                    "cyanosliverwort" : "#0059ff",
-                                    "cyanosmoss" : "#2601d8",
-                                    "lichen" : "#ff00c3",
-                                    "barkdominated" : "#Ff0000",
-                                    "cyanosbark" : "#FFA500",
-                                    "other" : "#FFFF00",
-                                }
+        ontology_file_name = "ontology_{0}.json".format(self.ontology_name)
+        
+        with open(ontology_file_name) as f:
+            self.ontology = json.load(f)
+            print(self.ontology)
+
+
+
+        # if self.ontology_name == "atto":
+        #     self.class_dict = {	    "background" : 0,
+        #                             "liverwort" : 1,
+        #                             "moss" : 2,
+        #                             "cyanosliverwort" : 3,
+        #                             "cyanosmoss" : 4,
+        #                             "lichen" : 5,
+        #                             "barkdominated" : 6,
+        #                             "cyanosbark" : 7,
+        #                             "other" : 8,
+        #                         }
+        #     self.ontology = {	    "background" : "#000000",
+        #                             "liverwort" : "#1cffbb",
+        #                             "moss" : "#00bcff",
+        #                             "cyanosliverwort" : "#0059ff",
+        #                             "cyanosmoss" : "#2601d8",
+        #                             "lichen" : "#ff00c3",
+        #                             "barkdominated" : "#Ff0000",
+        #                             "cyanosbark" : "#FFA500",
+        #                             "other" : "#FFFF00",
+        #                         }
             
-        elif self.ontology == "fbground":
-            self.class_dict = {
-                        "background" : 0,	
-                        "foreground" : 1,}
+        # elif self.ontology_name == "fbground":
+        #     self.class_dict = {
+        #                 "background" : 0,	
+        #                 "foreground" : 1,}
             
-            self.ontology = {
-                        "background" : "#000000",	
-                        "foreground" : "#FFFF00",}
+        #     self.ontology = {
+        #                 "background" : "#000000",	
+        #                 "foreground" : "#FFFF00",}
             
-            self.ignore_background = False
+        #     self.ignore_background = False
             
-        elif self.ontology == "gg":
-            self.class_dict = {
-                        "background" : 0,	
-                        "cyano_-_dominated" : 1,
-                        "lichen" : 2,
-                        "moss" : 3,
-                        "vascular plants" : 4,
-                        "rock" : 5,
-                        "other" : 6,
-                        "fungi" : 7,}
+        # elif self.ontology_name == "gg":
+        #     self.class_dict = {
+        #                 "background" : 0,	
+        #                 "cyano_-_dominated" : 1,
+        #                 "lichen" : 2,
+        #                 "moss" : 3,
+        #                 "vascular plants" : 4,
+        #                 "rock" : 5,
+        #                 "other" : 6,
+        #                 "fungi" : 7,}
             
-            self.ontology = {
-                        "background" : "#000000",	
-                        "cyano_-_dominated" : "#1CE6FF",
-                        "lichen" : "#ffdb0c",
-                        "moss" : "#FF4A46",
-                        "vascular plants" : "#008941",
-                        "rock" : "#dc22e6",
-                        "other" : "#B79762",
-                        "fungi" : "#7A4900",
-                        "markers" : "#FFDBE5",}
+        #     self.ontology = {
+        #                 "background" : "#000000",	
+        #                 "cyano_-_dominated" : "#1CE6FF",
+        #                 "lichen" : "#ffdb0c",
+        #                 "moss" : "#FF4A46",
+        #                 "vascular plants" : "#008941",
+        #                 "rock" : "#dc22e6",
+        #                 "other" : "#B79762",
+        #                 "fungi" : "#7A4900",
+        #                 "markers" : "#FFDBE5",}
+            
+        # elif self.ontology_name == "graz":
+        #     self.class_dict = {
+		# 							"background" : 0,
+		# 							"bryophyte" : 1,
+		# 							"lichen" : 2,
+		# 							"barkdominated" : 3,
+		# 							"other" : 4,}
+            
+        #     self.ontology = {
+        #                     "background" : "#000000",
+        #                     "bryophyte" : "#1CE6FF",
+        #                     "lichen" : "#FF34FF",
+        #                     "barkdominated" : "#FF4A46",
+        #                     "other" : "#928e00",}
+
             
             
             
@@ -151,12 +185,23 @@ class Trainer():
     def load_config(self):
         """ load server config by default, if not available load local config
         """
-        with open("server_config.yaml") as f:
+
+        if self.config_file == "None":
+            self.config_file = "server_config.yaml"
+
+        with open(self.config_file) as f:
             self.yaml_file = yaml.safe_load(f)
             self.best_model_path = self.yaml_file["best_model_path"]
+            self.ontology_name = self.yaml_file["ontology"]
+            self.use_gpu = self.yaml_file["use_gpu"]
+            if not self.use_gpu:
+                self.device = 'cpu'
+                print("Local testing? \n Using CPU! \n GPU NOT ACTIVATED!!!")
             print(self.best_model_path)
 
+        # load local config if path does not exist
         if not Path(self.yaml_file["img_dir"]).exists():
+            print("IMG Path does not exist\n Fall back to local config!")
             with open("local_config.yaml") as f:
                 self.yaml_file = yaml.safe_load(f)
                 self.best_model_path = self.yaml_file["best_model_path"]
@@ -406,13 +451,14 @@ class Trainer():
         """save model to model_save_path (experiment folder + best_model.pth)
         train/valid dataloaders seem to need a lot of memory and are not saved in the model
         """
+        old_ontology_dict = {class_name: data["color"] for class_name, data in self.ontology["ontology"].items()}
         ckpt_dict = {
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             # 'train_dl': self.train_loader,
             # 'valid_dl': self.valid_loader,
             'epoch': epoch,
-            'ontology' : self.ontology,
+            'ontology' : old_ontology_dict,
         }
         if not update_latest:
             torch.save(ckpt_dict, self.model_save_path)
@@ -976,25 +1022,29 @@ class Trainer():
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train or test segmentation model')
-    parser.add_argument('--mode', default='predict', type=str, help='mode: "train" for training model \n "test" for testing with ground truth and save results to pdf file \n "predict" for predicting whole images and save prediction mask', required=False)
+    parser.add_argument('--mode', default='train', type=str, help='mode: "train" for training model \n "test" for testing with ground truth and save results to pdf file \n "predict" for predicting whole images and save prediction mask', required=False)
+    parser.add_argument('--encoders', action="append", type=str, help='list of encoders to train/test/predict', required=True)
+    parser.add_argument('--config', default='server_local_debug.yml', type=str, help='config file for training/testing/predicting', required=True)
     args = parser.parse_args()
     return args
 
 if __name__ == "__main__":
-    # ontologies: atto, fbground, gg
-    ontology = 'gg'
+    # config_file = 'server_config_graz.yml'
 
     # encoder_list = ['mit_b0', 'efficientnet-b3', 'efficientnet-b7', 'vgg16', 'resnet50']
-    encoder_list = ['mit_b5']
-    seeds = [10]
-    # seeds = [20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150]
+    # encoder_list = ['mit_b1', 'mit_b3', 'mit_b5']
 
-    # seeds = [10]
+    seeds = [20]
     
     args = parse_args()
 
+    encoder_list = args.encoders
+    config_file = args.config
+
+    print(config_file)
+
     if args.mode == 'train':
-        trainer = Trainer(active_learning=False, save_val_uncertainty=True, ontology=ontology) # create Trainer object, load config & set default values
+        trainer = Trainer(active_learning=False, save_val_uncertainty=True, config_file=config_file) # create Trainer object, load config & set default values
         for encoder in encoder_list:
             trainer.set_encoder(encoder) # set encoder for model
             for seed in seeds:
@@ -1005,14 +1055,14 @@ if __name__ == "__main__":
                 trainer.set_paths(train_split=0.8, train=True) # set paths for training
                 trainer.create_dataloaders(augmentations=True) # create dataloaders from image and mask paths
                 trainer.prepare_model() # create Unet object and loss & metric objects and Training/Validation Epoch Runners
-                trainer.train_model(epochs=600) # start training routine using Training/Validation Epoch Runners
+                trainer.train_model(epochs=400) # start training routine using Training/Validation Epoch Runners
                 trainer.test_model()
     
     elif args.mode == 'test':
         # for encoder in encoder_list:
         encoder = 'mit_b5'
         print("Test: ", encoder, "\n")
-        trainer = Trainer(encoder=encoder, seed=seeds[0]) # create Trainer object and set default values
+        trainer = Trainer(encoder=encoder, seed=seeds[0], config_file=config_file) # create Trainer object and set default values
         trainer.set_paths() # set paths for testing (not recently tested)
         trainer.test_model() # test model
 
@@ -1020,7 +1070,7 @@ if __name__ == "__main__":
         # for encoder in encoder_list:
         encoder = 'mit_b5'
         print("Predict: ", encoder, "\n")
-        trainer = Trainer(encoder=encoder, seed=seeds[0], pred=True, ontology=ontology)
+        trainer = Trainer(encoder=encoder, seed=seeds[0], pred=True, config_file=config_file)
         trainer.set_paths(pred=True)
         trainer.predict(save_entropies=True)
 

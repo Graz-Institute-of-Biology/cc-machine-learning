@@ -1,0 +1,10 @@
+img_dir : 'C:\\Users\\faulhamm\\Documents\\Philipp\\training\\cc_graz'
+test_dir : 'C:\\Users\\faulhamm\\Documents\\Philipp\\Code\\cc-machine-learning\\test\\graz_mavic'
+mask_dir : 'C:\\Users\\faulhamm\\Documents\\Philipp\\training\\cc_graz'
+exp_dir : 'C:\\Users\\faulhamm\\Documents\\Philipp\\Code\\cc-machine-learning\\results'
+best_model_path : 'C:\\Users\\faulhamm\\Documents\\Philipp\\Code\\cc-machine-learning\\results\\dataset_v6_92_images\\mit_b5\\exp_mit_b5_02b18c\\best_model.pth'
+train_img : 'partial_images'
+train_mask : 'partial_masks'
+size : 1024
+ontology : 'graz'
+use_gpu : false

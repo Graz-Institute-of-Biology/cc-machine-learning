@@ -1,0 +1,6 @@
+{
+    "ontology": {
+        "background": {"value": 0, "color": "#000000"},
+        "foreground": {"value": 1, "color": "#FFFF00"}
+    }
+}

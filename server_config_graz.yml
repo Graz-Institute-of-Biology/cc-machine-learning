@@ -1,0 +1,10 @@
+img_dir : '/usr/people/EDVZ/faulhamm/cc-machine-learning/img'
+test_dir : '/usr/people/EDVZ/faulhamm/cc-machine-learning/test_graz'
+mask_dir : '/usr/people/EDVZ/faulhamm/cc-machine-learning/mask'
+exp_dir : '/usr/people/EDVZ/faulhamm/cc-machine-learning/experiments'
+best_model_path : '/usr/people/EDVZ/faulhamm/cc-machine-learning/experiments/exp_g_mit_b5_10_193d47/best_model.pth'
+train_img : 'graz'
+train_mask : 'graz'
+size : 1024
+ontology : 'graz'
+use_gpu : true

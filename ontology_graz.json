@@ -1,0 +1,9 @@
+{
+ "ontology" : {
+    "background" : { "value" : 0, "color" : "#000000"},
+    "bryophyte" : {"value" : 1, "color" : "#1CE6FF"},
+    "lichen" : {"value" : 2, "color" : "#FF34FF"},
+    "barkdominated" : {"value" : 3, "color" : "#FF4A46"},
+    "other" : {"value" : 4, "color" : "#928e00"}
+            }
+}
