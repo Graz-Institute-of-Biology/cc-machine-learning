@@ -61,16 +61,13 @@ class Trainer():
         
         if load_config:
             self.load_config()
-
+            self.load_ontology()
+            self.class_values = [d["value"] for d in self.ontology["ontology"].values()]
+            self.labels = list(self.ontology["ontology"].keys())
 
         # model settings
         self.encoder = encoder
         self.encoder_weights = encoder_weights
-        self.load_ontology()
-        
-        self.class_values = [d["value"] for d in self.ontology["ontology"].values()]
-        self.labels = list(self.ontology["ontology"].keys())
-        
         self.activation = 'softmax2d'
         self.lr_count = 0
         self.train_batch_size = 1
@@ -85,6 +82,7 @@ class Trainer():
     def load_ontology(self):
         """set ontologies, should be moved to separate file!!!
         """
+
         ontology_file_name = "ontology_{0}.json".format(self.ontology_name)
         
         with open(ontology_file_name) as f:
