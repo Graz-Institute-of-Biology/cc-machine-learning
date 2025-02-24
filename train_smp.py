@@ -457,6 +457,7 @@ class Trainer():
             # 'valid_dl': self.valid_loader,
             'epoch': epoch,
             'ontology' : old_ontology_dict,
+            'encoder': self.encoder
         }
         if not update_latest:
             torch.save(ckpt_dict, self.model_save_path)
@@ -1021,7 +1022,7 @@ class Trainer():
 def parse_args():
     parser = argparse.ArgumentParser(description='Train or test segmentation model')
     parser.add_argument('--mode', default='train', type=str, help='mode: "train" for training model \n "test" for testing with ground truth and save results to pdf file \n "predict" for predicting whole images and save prediction mask', required=False)
-    parser.add_argument('--encoders', action="append", type=str, help='list of encoders to train/test/predict', required=True)
+    parser.add_argument('--encoders', action="append", type=str, help='list of encoders to train/test/predict', required=False)
     parser.add_argument('--config', default='server_local_debug.yml', type=str, help='config file for training/testing/predicting', required=True)
     args = parser.parse_args()
     return args
@@ -1036,12 +1037,15 @@ if __name__ == "__main__":
     
     args = parse_args()
 
+    print(args.encoders)
     encoder_list = args.encoders
+    default_encoder = 'mit_b5'
     config_file = args.config
 
-    print(config_file)
+    print(encoder_list)
 
     if args.mode == 'train':
+        print("Training mode...")
         trainer = Trainer(active_learning=False, save_val_uncertainty=True, config_file=config_file) # create Trainer object, load config & set default values
         for encoder in encoder_list:
             trainer.set_encoder(encoder) # set encoder for model
@@ -1066,7 +1070,17 @@ if __name__ == "__main__":
 
     elif args.mode == 'predict':
         # for encoder in encoder_list:
-        encoder = 'mit_b5'
+        if encoder_list == None:
+            print("Using default encoder: ", default_encoder)
+            encoder = default_encoder
+        elif len(encoder_list) == 1:
+            print("Using encoder: ", encoder_list[0])
+            encoder = encoder_list[0]
+        elif len(encoder_list) > 1:
+            print("Too many encoders! Exiting...")
+            exit()
+
+
         print("Predict: ", encoder, "\n")
         trainer = Trainer(encoder=encoder, seed=seeds[0], pred=True, config_file=config_file)
         trainer.set_paths(pred=True)
