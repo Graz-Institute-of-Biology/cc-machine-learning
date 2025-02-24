@@ -19,6 +19,7 @@ matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 from matplotlib.colors import ListedColormap, BoundaryNorm
 import json
+from pathlib import Path
 
 from config import CONFIG
 import numpy as np
@@ -149,11 +150,14 @@ def send_result(color_coded_img, categorically_coded_img, ontology, item):
     img_byte_arr = io.BytesIO()
     color_coded_img.save(img_byte_arr, format='png')
 
+    name = Path(parent_file_url).stem
+    slug = name.lower()
+
     payload = {
-        "name" : 'test',
+        "name" : name,
         "owner" : 'admin',
-        "description" : "test description",
-        "slug" : 'test',
+        "description" : "empty",
+        "slug" : slug,
         "dataset" : dataset,
         "parent_image" : parent_img_id,
         "source_model" : ml_model_id,
@@ -161,7 +165,9 @@ def send_result(color_coded_img, categorically_coded_img, ontology, item):
         "parent_image_url" : parent_file_url,
         "class_distributions" : class_distributions,
     }
-    file = {'mask': ('image.jpg', img_byte_arr.getvalue(), 'image/png')}
+
+    mask_file_name = name + "_mask.png"
+    file = {'mask': (mask_file_name, img_byte_arr.getvalue(), 'image/png')}
     
     print("sending mask-POST-request...")
     mask_api_url = '{0}/django/api/v1/masks/'.format(CONFIG["HOST"]) #localhost:8000 or django:8000 (if using docker)
