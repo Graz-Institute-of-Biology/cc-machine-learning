@@ -246,6 +246,12 @@ def prepare_load_model(model_url, num_classes, encoder='mit_b5'):
         activation = checkpoint['activation']
         encoder_weights = checkpoint['encoder_weights']
         encoder = checkpoint['encoder']
+        print("Using model settings from checkpoint: \n")
+        print("Crop size: ", crop_size)
+        print("Num classes: ", num_classes)
+        print("Activation: ", activation)
+        print("Encoder weights: ", encoder_weights)
+        print("Encoder: ", encoder)
     except KeyError:
         print("No model settings found in checkpoint, trying default values")
 
@@ -270,7 +276,9 @@ def add_parent_dir():
 def load_image(image_url):
     if 'localhost' in image_url:
         image_url = image_url.replace('localhost', 'django')
-
+        print("replaced:", image_url)
+    else:
+        print("not replaced:", image_url)
     response = requests.get(image_url)
     img = Image.open(BytesIO(response.content))
     return img

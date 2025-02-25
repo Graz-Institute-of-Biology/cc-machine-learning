@@ -962,8 +962,8 @@ class Trainer():
 
                 sub_img = padded_img_large[h1:h2, w1:w2, :]
                 sub_img = self.preprocessing(image=sub_img)['image']
-                print("Coords: ", h1, h2, w1, w2)
-                print("IMAGE: ", sub_img.shape)
+                # print("Coords: ", h1, h2, w1, w2)
+                # print("IMAGE: ", sub_img.shape)
 
                 if get_entropies:
                     color_coded_mask, entropies = self.calculate_prediction(sub_img, return_entropy=True)
@@ -972,9 +972,9 @@ class Trainer():
                     whole_entropies[h1+outer_gap:h2-outer_gap, w1+outer_gap:w2-outer_gap] = entropies
                 else:
                     color_coded_mask = self.calculate_prediction(sub_img)
+                    print("Unique for subImg: ", np.unique(color_coded_mask))
                 
                 color_coded_mask = color_coded_mask[outer_gap:focus_size + outer_gap, outer_gap:focus_size + outer_gap]
-                print("Colored mask:", color_coded_mask.shape)
                 whole_mask[h1+outer_gap:h2-outer_gap, w1+outer_gap:w2-outer_gap] = color_coded_mask
 
                 # plt.figure()
