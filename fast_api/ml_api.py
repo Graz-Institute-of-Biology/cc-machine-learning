@@ -231,6 +231,8 @@ def prepare_load_model(model_url, num_classes, encoder='mit_b5'):
     encoder_weights = 'imagenet'
     activation = 'sigmoid'
 
+    if 'localhost' in model_url:
+        model_url = model_url.replace('localhost', 'django')
 
     response = requests.get(model_url)
     # print(response.content)
@@ -266,6 +268,9 @@ def add_parent_dir():
         sys.path.insert(0, parentdir)
 
 def load_image(image_url):
+    if 'localhost' in image_url:
+        image_url = image_url.replace('localhost', 'django')
+
     response = requests.get(image_url)
     img = Image.open(BytesIO(response.content))
     return img
