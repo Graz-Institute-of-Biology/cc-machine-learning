@@ -19,7 +19,7 @@ ENV_CONFIG = {
 
     "staging": {
         "DEBUG": True,
-        "HOST": "http://localhost:8000", # default "localhost", "django" if using docker
+        "HOST": "django:8000", # default "localhost", "django" if using docker
     },
 
     "production": {
