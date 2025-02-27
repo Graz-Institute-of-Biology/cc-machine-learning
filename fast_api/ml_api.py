@@ -189,16 +189,30 @@ def get_hex_from_dict(ontology):
     return colors_hex
 
 def plot_save_mask(mask, ontology):
+    """ saves color mask
+
+
+    Args:
+        mask (np array)):   2 dim array with predictions [[0011][23NN][...]] with N classes
+        ontology (dict):    dictionary with either class values { "0" : "HEX1" , "1" : "HEX2" , ... , "N" : HEXN"] 
+                            or class names {"background" : "HEX1" "class1" : "HEX2", ... , "classN" : "HEXN"} 
+                            as keys and color values as values
+
+    Returns:
+        _type_: _description_
+    """
 
     print("plot & save results...")
     mask = np.array(mask)
     labels = list(ontology.keys())
-    if list(ontology.keys())[0] == "0":
+    if labels[0] == "0":
         print("GET HEX FROM DICT")
         colors_hex = get_hex_from_dict(ontology)
     else:
+        print("list(ontology.values())")
         colors_hex = list(ontology.values())
 
+    print("COLORS: ", colors_hex)
     # colors_hex = ["#000000","#1cffbb", "#00bcff","#0059ff", "#2601d8", "#ff00c3", "#FF4A46", "#ff7500", "#928e00"]
     col = ListedColormap(colors_hex)
     bounds = np.arange(len(colors_hex))
