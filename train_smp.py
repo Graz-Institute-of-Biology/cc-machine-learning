@@ -890,8 +890,14 @@ class Trainer():
     
     def save_mask(self, mask, img_name):
         from PIL import Image
+        mask_name = "mask.png"
 
-        save_path = os.path.join(self.test_dir, img_name.replace(".JPG", "_mask.png"))
+        if img_name.endswith(".JPG"):
+            mask_name = img_name.replace(".JPG", "_mask.png")
+        elif img_name.endswith(".jpg"):
+            mask_name = img_name.replace(".jpg", "_mask.png")
+
+        save_path = os.path.join(self.test_dir, mask_name)
         im = Image.fromarray(mask)
         im.save(save_path)
         
