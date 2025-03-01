@@ -5,6 +5,8 @@ import os
 import sys
 import traceback
 from joblib import load
+import redis
+import json
 
 import uvicorn
 from contextlib import asynccontextmanager
@@ -26,6 +28,12 @@ from dataclasses import dataclass
 from fastapi.middleware.cors import CORSMiddleware
 
 
+redis_client = redis.Redis(
+    host=os.environ.get('REDIS_HOST', 'redis'),
+    port=int(os.environ.get('REDIS_PORT', 6379)),
+    decode_responses=True
+)
+
 
 @dataclass
 class Item:
@@ -42,15 +50,71 @@ class Item:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Load the ML model
-    logger.info('Running envirnoment prody: {}'.format(CONFIG['ENV']))
-    # logger.info('PyTorch using device: {}'.format(CONFIG['DEVICE']))
+
+    print('Running envirnoment: {}'.format(CONFIG['ENV']))
     
     q = asyncio.Queue()  # note that asyncio.Queue() is not thread safe
     pool = ProcessPoolExecutor(max_workers=1)
+
+    # Check for pending tasks on startup
+    try:
+        print(f"Checking Redis for pending tasks...")
+        pending_items = redis_client.keys("pending:*")
+        for key in pending_items:
+            item_data = json.loads(redis_client.get(key))
+            # Create Item object from the stored data
+            item = Item(
+                id=item_data["id"],
+                ml_model_path=item_data["ml_model_path"],
+                file_path=item_data["file_path"],
+                analysis_id=item_data["analysis_id"],
+                parent_img_id=item_data["parent_img_id"],
+                ml_model_id=item_data["ml_model_id"],
+                dataset_id=item_data["dataset_id"],
+                token=item_data["token"],
+                debug=item_data["debug"],
+                num_classes=item_data["num_classes"]
+            )
+            # Put the item in the queue
+            await q.put(item)
+            logger.info(f"Requeued pending analysis {item.id}")
+    except Exception as e:
+        logger.error(f"Error requeuing pending tasks: {e}")
+
     asyncio.create_task(process_requests(q, pool))  # Start the requests processing task
     yield {'q': q, 'pool': pool}
     pool.shutdown()
+
+
+async def process_requests(q: asyncio.Queue, pool: ProcessPoolExecutor):
+    while True:
+        item = await q.get()
+        loop = asyncio.get_running_loop()
+
+        redis_client.set(f"processing:{item.id}", json.dumps(item.__dict__))
+        redis_client.delete(f"pending:{item.id}")
+
+        print("Processing")
+        try:
+            r = await loop.run_in_executor(pool, manage_prediction_request, item)
+            print("Successful ??")
+            print(r)
+
+            redis_client.delete(f"processing:{item.id}")
+
+        except Exception as e:
+            print("Error")
+            print(e)
+            redis_client.set(f"failed:{item.id}", json.dumps({
+                "item": item.__dict__,
+                "error": str(e)
+            }))
+            redis_client.delete(f"processing:{item.id}")
+
+            # update_analysis(analysis_id=item.analysis_id, token=item.token, completed=False, status="Error", error=str(e))
+        q.task_done()
+
+
 
 # Initialize API Server
 app = FastAPI(
@@ -82,25 +146,6 @@ elif CONFIG['ENV'] == 'production':
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(Exception, python_exception_handler)
 
-async def process_requests(q: asyncio.Queue, pool: ProcessPoolExecutor):
-    while True:
-        item = await q.get()
-        loop = asyncio.get_running_loop()
-        print("Processing")
-        try:
-            r = await loop.run_in_executor(pool, manage_prediction_request, item)
-            print("Successful ??")
-            print(r)
-        except Exception as e:
-            print("Error")
-            print(e)
-            # update_analysis(analysis_id=item.analysis_id, token=item.token, completed=False, status="Error", error=str(e))
-        q.task_done()
-
-
-
-
-
 @app.post('/api/v1/predict',
           response_model=InferenceResponse,
           responses={422: {"model": ErrorResponse},
@@ -128,6 +173,9 @@ async def do_predict(request: Request, body: InferenceInput, background_tasks: B
                     token=body.token,
                     num_classes=body.num_classes
                     )
+
+        redis_client.set(f"pending:{item.id}", json.dumps(item.__dict__))
+
         update_analysis(analysis_id=body.analysis_id, token=body.token, completed=False, status="Received/Queued")
         background_tasks.add_task(request.state.q.put_nowait, item)
 
@@ -137,6 +185,7 @@ async def do_predict(request: Request, body: InferenceInput, background_tasks: B
         error = traceback.format_exc()
         print("ERROR:")
         print(error)
+        
         update_analysis(analysis_id=body.analysis_id, token=body.token, completed=False, status="Error", error=error)
         return {"error": True}
 
