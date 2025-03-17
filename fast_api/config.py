@@ -41,6 +41,8 @@ def get_config() -> dict:
     ENV = ENV or 'development'
     print(ENV)
 
+    rd_pw = os.environ['REDIS_PASSWORD'] if 'REDIS_PASSWORD' in os.environ else None
+
     # raise error if environment is not expected
     if ENV not in ENV_CONFIG:
         raise EnvironmentError(f'Config for envirnoment {ENV} not found')
@@ -49,6 +51,7 @@ def get_config() -> dict:
     config.update(ENV_CONFIG[ENV])
 
     config['ENV'] = ENV
+    config['REDIS_PASSWORD'] = rd_pw
     # config['DEVICE'] = 'cpu'
 
     return config

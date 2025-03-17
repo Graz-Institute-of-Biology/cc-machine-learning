@@ -27,12 +27,20 @@ import asyncio
 from dataclasses import dataclass
 from fastapi.middleware.cors import CORSMiddleware
 
+redis_password = CONFIG['REDIS_PASSWORD'] if 'REDIS_PASSWORD' in CONFIG else None
+if redis_password is not None:
+    redis_client = redis.Redis(
+        host=os.environ.get('REDIS_HOST', 'redis'),
+        port=int(os.environ.get('REDIS_PORT', 6379)),
+        password=redis_password,
+        )
+else:
 
-redis_client = redis.Redis(
-    host=os.environ.get('REDIS_HOST', 'redis'),
-    port=int(os.environ.get('REDIS_PORT', 6379)),
-    decode_responses=True
-)
+    redis_client = redis.Redis(
+        host=os.environ.get('REDIS_HOST', 'redis'),
+        port=int(os.environ.get('REDIS_PORT', 6379)),
+        decode_responses=True
+    )
 
 
 @dataclass
