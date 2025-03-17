@@ -212,12 +212,15 @@ class Trainer():
 
         # image size: 2048, 1024, 512, 256
         self.size = self.yaml_file["size"]
-        self.forest_type = self.yaml_file["train_img"][0]
+        self.forest_type = self.yaml_file["train_img"]
 
 
     def set_non_unique_paths(self, train_split):
         self.images_fps = sorted([os.path.join(self.img_dir, image_id) for image_id in self.ids if image_id.lower().endswith(".jpg")])
-        self.masks_fps = sorted([os.path.join(self.mask_dir, image_id.replace("JPG", "png")) for image_id in self.ids])
+        if self.images_fps[0].endswith(".JPG"):
+            self.masks_fps = sorted([os.path.join(self.mask_dir, image_id.replace("JPG", "png")) for image_id in self.ids])
+        elif self.images_fps[0].endswith(".jpg"):
+            self.masks_fps = sorted([os.path.join(self.mask_dir, image_id.replace("jpg", "png")) for image_id in self.ids])
 
 
         train_len = int(len(self.images_fps) * train_split)
@@ -254,11 +257,18 @@ class Trainer():
 
 
         self.x_train = [os.path.join(self.img_dir, x) for x in self.ids if x.split("_part")[0] in unique_train_imgs]
-        self.y_train = [os.path.join(self.mask_dir, x.replace("JPG", "png")) for x in self.ids if x.split("_part")[0] in unique_train_imgs]
 
-        self.x_valid = [os.path.join(self.img_dir, x) for x in self.ids if x.split("_part")[0] in unique_val_imgs]
-        self.y_valid = [os.path.join(self.mask_dir, x.replace("JPG", "png")) for x in self.ids if x.split("_part")[0] in unique_val_imgs]
+        if self.x_train[0].endswith(".JPG"):
+            self.y_train = [os.path.join(self.mask_dir, x.replace("JPG", "png")) for x in self.ids if x.split("_part")[0] in unique_train_imgs]
+        elif self.x_train[0].endswith(".jpg"):
+            self.y_train = [os.path.join(self.mask_dir, x.replace("jpg", "png")) for x in self.ids if x.split("_part")[0] in unique_train_imgs]
         
+        self.x_valid = [os.path.join(self.img_dir, x) for x in self.ids if x.split("_part")[0] in unique_val_imgs]
+
+        if self.x_valid[0].endswith(".JPG"):
+            self.y_valid = [os.path.join(self.mask_dir, x.replace("JPG", "png")) for x in self.ids if x.split("_part")[0] in unique_val_imgs]
+        elif self.x_valid[0].endswith(".jpg"):
+            self.y_valid = [os.path.join(self.mask_dir, x.replace("jpg", "png")) for x in self.ids if x.split("_part")[0] in unique_val_imgs]
 
         self.x_test = self.x_valid.copy()
         self.y_test = self.y_valid.copy()
@@ -903,8 +913,13 @@ class Trainer():
         
     def save_entropy_image(self, entropies, img_name):
 
+        if img_name.endswith(".JPG"):
+            img_name = img_name.replace(".JPG", "_entropy.png")
+        elif img_name.endswith(".jpg"):
+            img_name = img_name.replace(".jpg", "_entropy.png")
+
         plt.figure()
-        plt.imsave(os.path.join(self.test_dir, img_name.replace(".JPG", "_entropy.png")), entropies)
+        plt.imsave(os.path.join(self.test_dir, img_name), entropies)
         plt.close()
 
     def predict_whole_image(self, img, debug=False, get_entropies=False):
@@ -1052,7 +1067,7 @@ if __name__ == "__main__":
 
     if args.mode == 'train':
         print("Training mode...")
-        trainer = Trainer(active_learning=False, save_val_uncertainty=True, config_file=config_file) # create Trainer object, load config & set default values
+        trainer = Trainer(active_learning=False, save_val_uncertainty=False, config_file=config_file) # create Trainer object, load config & set default values
         for encoder in encoder_list:
             trainer.set_encoder(encoder) # set encoder for model
             for seed in seeds:
