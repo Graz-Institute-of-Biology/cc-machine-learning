@@ -68,6 +68,10 @@ async def lifespan(app: FastAPI):
     try:
         print(f"Checking Redis for pending tasks...")
         pending_items = redis_client.keys("pending:*")
+        processing_items = redis_client.keys("processing:*")
+        all_items = processing_items + pending_items
+        print("Found {0} pending/unfinished task(s): ".format(len(all_items)))
+        print(all_items)
         for key in pending_items:
             item_data = json.loads(redis_client.get(key))
             # Create Item object from the stored data
