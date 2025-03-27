@@ -153,6 +153,9 @@ def send_result(color_coded_img, categorically_coded_img, ontology, item):
     name = Path(parent_file_url).stem
     slug = name.lower()
 
+    if len(slug) > 50:
+        slug = slug[:50]
+
     payload = {
         "name" : name,
         "owner" : 'admin',
@@ -160,6 +163,7 @@ def send_result(color_coded_img, categorically_coded_img, ontology, item):
         "slug" : slug,
         "dataset" : dataset,
         "parent_image" : parent_img_id,
+        "source_manual" : False,
         "source_model" : ml_model_id,
         "source_model_url" : source_model_url,
         "parent_image_url" : parent_file_url,
@@ -215,7 +219,7 @@ def plot_save_mask(mask, ontology):
     print("COLORS: ", colors_hex)
     # colors_hex = ["#000000","#1cffbb", "#00bcff","#0059ff", "#2601d8", "#ff00c3", "#FF4A46", "#ff7500", "#928e00"]
     col = ListedColormap(colors_hex)
-    bounds = np.arange(len(colors_hex))
+    bounds = np.arange(len(colors_hex) +1 ) - 0.5
     norm = BoundaryNorm(bounds, col.N)  
     # img_arr = np.zeros((mask.shape[0], mask.shape[1], 3), dtype=np.uint8)
     fig = plt.figure(figsize=mask.shape[:2][::-1], dpi=1)
