@@ -618,7 +618,12 @@ class Trainer():
 
         n = len(images)
 
-        colors_hex = ["#000000","#1cffbb", "#00bcff","#0059ff", "#2601d8", "#ff00c3", "#FF4A46", "#ff7500", "#928e00"]
+        # colors_hex = ["#000000","#1cffbb", "#00bcff","#0059ff", "#2601d8", "#ff00c3", "#FF4A46", "#ff7500", "#928e00"]
+        colors_hex = []
+
+        for key in self.ontology["ontology"].keys():
+            colors_hex.append(self.ontology["ontology"][key]["color"])
+
         col = ListedColormap(colors_hex)
         bounds = np.arange(len(colors_hex)+1)
         norm = BoundaryNorm(bounds, col.N)  
@@ -635,22 +640,9 @@ class Trainer():
             plt.title(' '.join(name.split('_')).title())
 
             if not name == 'image':
-                # image = image.transpose(1, 2, 0)
-                # out = np.zeros((image.shape[0], image.shape[1]), dtype=np.int64)
-
-                # for v in self.class_values:
-                #     out[image[:,:,v] == 1] = v
-                # image = out
-                # unique_values = np.unique(image)
-
                 image, unique_values = self.get_2d_image(image)
 
                 plt.imshow(image, cmap=col, interpolation='nearest', norm=norm)
-                # patches = [ mpatches.Patch(color=colors_hex[i], label=labels[i] ) for i in range(len(colors))]
-
-                # plot all class values in legend
-                # patches = [ mpatches.Patch(color=colors_hex[e], label=labels[i] ) for i,e in enumerate(self.class_values)]
-                
                 # plot only unique class values in legend
                 patches = [ mpatches.Patch(color=colors_hex[i], label=self.labels[i] ) for i in unique_values]
 
@@ -1054,9 +1046,10 @@ if __name__ == "__main__":
     # encoder_list = ['mit_b0', 'efficientnet-b3', 'efficientnet-b7', 'vgg16', 'resnet50']
     # encoder_list = ['mit_b1', 'mit_b3', 'mit_b5']
 
-    seeds = [20]
+    seeds = [30]
     
     args = parse_args()
+
 
     print(args.encoders)
     encoder_list = args.encoders
