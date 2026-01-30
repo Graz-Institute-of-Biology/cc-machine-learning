@@ -10,35 +10,22 @@ def get_training_augmentation(min_height=1024, min_width=1024):
 
         albu.ShiftScaleRotate(scale_limit=0.1, rotate_limit=45, shift_limit=0.1, p=1, border_mode=0),
 
+        # added stronger augmentations
+        # albu.RandomBrightnessContrast(p=0.5),
+        # albu.HueSaturationValue(hue_shift_limit=10, sat_shift_limit=20, val_shift_limit=10, p=0.5),
+        # albu.GaussNoise(var_limit=(10, 50), p=0.3),
 
         # albu.IAAAdditiveGaussianNoise(p=0.2),
-        albu.IAAPerspective(p=0.5),
-
-        # albu.OneOf(
-        #     [
-        #         albu.CLAHE(p=1),
-        #         albu.RandomBrightness(p=1),
-        #         albu.RandomGamma(p=1),
-        #     ],
-        #     p=0.9,
-        # ),
+        albu.Perspective(p=0.5),
 
         albu.OneOf(
             [
-                albu.IAASharpen(p=1),
+                albu.Sharpen(p=1),
                 albu.Blur(blur_limit=3, p=1),
                 albu.MotionBlur(blur_limit=3, p=1),
             ],
             p=0.2,
         ),
-
-        # albu.OneOf(
-        #     [
-        #         albu.RandomContrast(p=1),
-        #         albu.HueSaturationValue(p=1),
-        #     ],
-        #     p=0.9,
-        # ),
     ]
     return albu.Compose(train_transform)
 
