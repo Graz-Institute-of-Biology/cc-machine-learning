@@ -1339,6 +1339,7 @@ def parse_args():
     parser.add_argument('--encoders', action="append", type=str, help='list of encoders to train/test/predict', required=False)
     parser.add_argument('--config', default='server_local_debug.yml', type=str, help='config file for training/testing/predicting', required=True)
     parser.add_argument('--cross_val_run', default=0, type=int, help='cross validation run index (0...n)', required=False)
+    parser.add_argument('--epochs', default=300, type=int, help='number of training epochs', required=False)
     parser.add_argument('--memory_optimized', action='store_true', help='enable memory optimized training with gradient checkpointing and 8-bit optimizer', required=False)
     args = parser.parse_args()
     return args
@@ -1363,14 +1364,16 @@ if __name__ == "__main__":
     cross_val_run = args.cross_val_run
     cross_val_exp_series = str(uuid.uuid4())[:6]
     memory_optimized = args.memory_optimized
+    epochs = args.epochs
 
     print(encoder_list)
 
     if args.mode == 'train':
         print("Training mode...")
         print(f"Memory optimized: {memory_optimized}")
+        print(f"Number of epochs: {epochs}")
         trainer = Trainer(active_learning=False,
-                          epochs=300,
+                          epochs=epochs,
                           save_val_uncertainty=False,
                           train_split=train_split,
                           cross_validation=True,
