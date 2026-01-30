@@ -61,17 +61,24 @@ def get_dist_per_height(df, height):
     return column_means, img_counts
 
 def plot_heights(df, title):
-    fig, axes = plt.subplots(3, 1, figsize=(3.5, 8))
     plt.rcParams.update({'font.size': 12})
+
+
+    habitat_names = list(MICRO_HABITATS.keys())
+
+    if "terra" in title.lower():
+        fig, axes = plt.subplots(3, 1, figsize=(6, 8))
+        heights = ["C", "M", "G"]
+        positions = [0, 1, 2]
+
+    else:
+        fig, axes = plt.subplots(2, 1, figsize=(6, 6))
+        heights = ["C", "G"]
+        positions = [0, 1]
 
     fig.suptitle(title)
     habitat_num = 0
-    habitat_names = list(MICRO_HABITATS.keys())
-    heights = ["C", "M", "G"]
-    # heights = ["C", "G"]
-    positions = [0, 1, 2]
-    # positions = [0, 1]
-
+    
     for j in positions:
         print("Height: ", heights[j], "\n")
         column_means, img_counts = get_dist_per_height(df, heights[j])
@@ -88,7 +95,7 @@ def plot_heights(df, title):
         axes[j].set_ylabel('Classes', fontsize=20)
         axes[j].grid()
         for i in range(len(column_means)):
-            axes[j].annotate("{:.2f}%".format(column_means[i]), xy=(column_means[i]+3, SHORT_LABELS[i]), ha='center', va='center')
+            axes[j].annotate("{:.2f}%".format(column_means[i]), xy=(column_means[i]+7, SHORT_LABELS[i]), ha='center', va='center')
 
         habitat_num += 1
 
@@ -187,12 +194,6 @@ def plot_overall_(df, title):
     for i in range(len(column_means)):
         plt.annotate("{:.2f}%".format(column_means[i]), xy=(SHORT_LABELS[i],column_means[i]), ha='center', va='bottom')
 
-
-
-
-
-
-    
     plt.tight_layout()
     plt.grid()
     plt.show()
@@ -201,17 +202,19 @@ def plot_overall_(df, title):
 # file_path = "dist_dataframe_dummy.csv"
 # title = "Coverage distribution of example image"
 
-# file_path = "dist_dataframe_c_v11full.csv"
-# title = "Coverage distribution across heights in Campina"
+file_path_c = "dist_dataframe_c_v11full.csv"
+title_c = "Coverage distribution across heights in Campina"
 
-file_path = "dist_dataframe_tf_v11full.csv"
-title = "Coverage distribution across heights of Terra Firme"
+file_path_tf = "dist_dataframe_tf_v11full.csv"
+title_tf = "Coverage distribution across heights of Terra Firme"
 
-df = pd.read_csv(file_path, index_col=0)
-print(len(df))
+df_tf = pd.read_csv(file_path_tf, index_col=0)
+df_c = pd.read_csv(file_path_c, index_col=0)
+print(len(df_tf))
 # print(df)
 
 # plot_all_micro_habitats(df)
-plot_heights(df, title=title)
+plot_heights(df_tf, title=title_tf)
+plot_heights(df_c, title=title_c)
 # plot_directions(df)
 # plot_overall_(df, title=title)
