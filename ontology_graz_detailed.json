@@ -1,0 +1,25 @@
+{
+ "ontology" : {
+    "background" : { "value" : 0, "color" : "#000000"},
+    "bryophyte" : {"value" : 1, "color" : "#1CE6FF"},
+    "lichen" : {"value" : 2, "color" : "#FF34FF"},
+    "barkdominated" : {"value" : 3, "color" : "#FF4A46"},
+    "other" : {"value" : 4, "color" : "#928e00"},
+    "orthotrichum" : {"value" : 5, "color" : "#00a646"},
+    "tortula" : {"value" : 6, "color" : "#c7ff01"},
+    "hedwigia" : {"value" : 7, "color" : "#FFDBE5"},
+    "isothecium" : {"value" : 8, "color" : "#7A4900"},
+    "leskea" : {"value" : 9, "color" : "#0000A6"},
+    "syntrichia" : {"value" : 10, "color" : "#63FFAC"},
+    "pottiaceae" : {"value" : 11, "color" : "#B79762"},
+    "dicranum" : {"value" : 12, "color" : "#004D43"},
+    "plagiomnium" : {"value" : 13, "color" : "#8FB0FF"},
+    "platygyrium" : {"value" : 14, "color" : "#997D87"},
+    "nyholmiella" : {"value" : 15, "color" : "#5A0007"},
+    "bryum" : {"value" : 16, "color" : "#809693"},
+    "radula" : {"value" : 17, "color" : "#FEFFE6"},
+    "lewinskya" : {"value" : 18, "color" : "#1B4400"},
+    "hypnum" : {"value" : 19, "color" : "#4FC601"},
+    "pylaisia" : {"value" : 20, "color" : "#3B5DFF"}
+ }
+}
