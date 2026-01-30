@@ -1,5 +1,6 @@
+import subprocess
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+# os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 # import keras.backend as K
 # K.set_image_data_format('channels_first')
 
@@ -27,6 +28,7 @@ import uuid
 from training_helper import get_preprocessing, get_training_augmentation, get_validation_augmentation
 ssl._create_default_https_context = ssl._create_unverified_context
 import json
+import wandb
 
 
 class Trainer():
@@ -37,29 +39,51 @@ class Trainer():
 
     def __init__(self, 
                  encoder='efficientnet-b3', 
-                 encoder_weights='imagenet', 
+                 encoder_weights='imagenet',
+                 optimizer_name='Adam',
+                 train_split=0.8,
+                 epochs=1000,
                  seed=10,
                  load_config=True,
                  device='cuda', 
                  size=1024, 
                  pred=False, 
-                 active_learning=False, 
+                 active_learning=False,
+                 cross_validation=False,
+                 n_folds=0,
                  save_val_uncertainty=False,
-                 config_file="None", ):
+                 config_file="None",
+                 cross_val_exp_series="none",
+                 memory_optimized=False):
 
         self.size = size
         self.pred = pred
         self.seed = seed
+        self.dataset = None
         self.active_learning=active_learning
         self.save_val_uncertainty = save_val_uncertainty
         self.ignore_background = True
         self.config_file = config_file
         self.device = device
+        self.epochs = epochs
+        self.train_split = train_split
+        self.cross_validation = cross_validation
+        self.cross_val_run = 0
+        self.n_folds = n_folds
+        self.cross_val_exp_series = cross_val_exp_series
+        self.memory_optimized = memory_optimized
+        
+        if self.memory_optimized:
+            self.num_workers = 0
+        else:
+            self.num_workers = 1
+
 
         if self.active_learning:
             self.save_val_uncertainty = True
         
         if load_config:
+            self.ontology_file_name = None
             self.load_config()
             self.load_ontology()
             self.class_values = [d["value"] for d in self.ontology["ontology"].values()]
@@ -69,99 +93,27 @@ class Trainer():
         self.encoder = encoder
         self.encoder_weights = encoder_weights
         self.activation = 'softmax2d'
-        self.lr_count = 0
-        self.train_batch_size = 1
-        self.val_batch_size = 1
-        self.lr_schedule = [1e-4,1e-5,1e-6,1e-7,1e-8,1e-9]
-        self.lr = self.lr_schedule[self.lr_count]
+        self.optimizer_name = optimizer_name
+        self.batch_size = 1
+        self.lr = 1e-4
         self.uncertainy_runs = 10
+        self.weight_decay = 1e-4
+        self.lr_scheduler = "ReduceLROnPlateau"
 
         self.preprocessing_fn = smp.encoders.get_preprocessing_fn(self.encoder, self.encoder_weights)
         self.preprocessing = get_preprocessing(self.preprocessing_fn)
+
 
     def load_ontology(self):
         """set ontologies, should be moved to separate file!!!
         """
 
-        ontology_file_name = "ontology_{0}.json".format(self.ontology_name)
+        if self.ontology_file_name is None:
+            self.ontology_file_name = "ontology_{0}.json".format(self.ontology_name)
         
-        with open(ontology_file_name) as f:
+        with open(self.ontology_file_name) as f:
             self.ontology = json.load(f)
             print(self.ontology)
-
-
-
-        # if self.ontology_name == "atto":
-        #     self.class_dict = {	    "background" : 0,
-        #                             "liverwort" : 1,
-        #                             "moss" : 2,
-        #                             "cyanosliverwort" : 3,
-        #                             "cyanosmoss" : 4,
-        #                             "lichen" : 5,
-        #                             "barkdominated" : 6,
-        #                             "cyanosbark" : 7,
-        #                             "other" : 8,
-        #                         }
-        #     self.ontology = {	    "background" : "#000000",
-        #                             "liverwort" : "#1cffbb",
-        #                             "moss" : "#00bcff",
-        #                             "cyanosliverwort" : "#0059ff",
-        #                             "cyanosmoss" : "#2601d8",
-        #                             "lichen" : "#ff00c3",
-        #                             "barkdominated" : "#Ff0000",
-        #                             "cyanosbark" : "#FFA500",
-        #                             "other" : "#FFFF00",
-        #                         }
-            
-        # elif self.ontology_name == "fbground":
-        #     self.class_dict = {
-        #                 "background" : 0,	
-        #                 "foreground" : 1,}
-            
-        #     self.ontology = {
-        #                 "background" : "#000000",	
-        #                 "foreground" : "#FFFF00",}
-            
-        #     self.ignore_background = False
-            
-        # elif self.ontology_name == "gg":
-        #     self.class_dict = {
-        #                 "background" : 0,	
-        #                 "cyano_-_dominated" : 1,
-        #                 "lichen" : 2,
-        #                 "moss" : 3,
-        #                 "vascular plants" : 4,
-        #                 "rock" : 5,
-        #                 "other" : 6,
-        #                 "fungi" : 7,}
-            
-        #     self.ontology = {
-        #                 "background" : "#000000",	
-        #                 "cyano_-_dominated" : "#1CE6FF",
-        #                 "lichen" : "#ffdb0c",
-        #                 "moss" : "#FF4A46",
-        #                 "vascular plants" : "#008941",
-        #                 "rock" : "#dc22e6",
-        #                 "other" : "#B79762",
-        #                 "fungi" : "#7A4900",
-        #                 "markers" : "#FFDBE5",}
-            
-        # elif self.ontology_name == "graz":
-        #     self.class_dict = {
-		# 							"background" : 0,
-		# 							"bryophyte" : 1,
-		# 							"lichen" : 2,
-		# 							"barkdominated" : 3,
-		# 							"other" : 4,}
-            
-        #     self.ontology = {
-        #                     "background" : "#000000",
-        #                     "bryophyte" : "#1CE6FF",
-        #                     "lichen" : "#FF34FF",
-        #                     "barkdominated" : "#FF4A46",
-        #                     "other" : "#928e00",}
-
-            
             
             
     def set_seed(self, seed):
@@ -180,22 +132,42 @@ class Trainer():
         """
         self.encoder = encoder
 
+    def load_dataset_info(self):
+        self.dataset = self.yaml_file["dataset"]
+        dataset_info_path = os.path.join(self.yaml_file["img_dir"], self.dataset, "dataset_info.json")
+        with open(dataset_info_path) as f:
+            self.dataset_info = json.load(f)
+            self.ontology_name = self.dataset_info["ontology_file"].split(".json")[0].split("ontology_")[-1]
+            self.ontology_file_name = self.dataset_info["ontology_file"]
+            self.wandb_project = self.dataset_info["wandb_project"]
+            self.wandb_logged_artifact = self.dataset_info["logged_artifact"]
+            self.wandb_qualified_name = self.dataset_info["qualified_name"]
+
     def load_config(self):
         """ load server config by default, if not available load local config
         """
 
         if self.config_file == "None":
             self.config_file = "server_config.yaml"
+                
 
         with open(self.config_file) as f:
             self.yaml_file = yaml.safe_load(f)
             self.best_model_path = self.yaml_file["best_model_path"]
-            self.ontology_name = self.yaml_file["ontology"]
             self.use_gpu = self.yaml_file["use_gpu"]
             if not self.use_gpu:
                 self.device = 'cpu'
                 print("Local testing? \n Using CPU! \n GPU NOT ACTIVATED!!!")
             print(self.best_model_path)
+
+        if "dataset" in self.yaml_file:
+            self.load_dataset_info()
+
+        else:
+            self.ontology_name = self.yaml_file["ontology"]
+            self.ontology_file_name = "ontology_{0}.json".format(self.ontology_name)
+            self.size = self.yaml_file["size"]
+            self.wandb_project = self.yaml_file["train_img"]
 
         # load local config if path does not exist
         if not Path(self.yaml_file["img_dir"]).exists():
@@ -205,14 +177,86 @@ class Trainer():
                 self.best_model_path = self.yaml_file["best_model_path"]
 
 
-        # PATHS SERVER
-        self.img_dir = Path(os.path.join(self.yaml_file["img_dir"], str(self.yaml_file["train_img"])))
-        self.mask_dir = Path(os.path.join(self.yaml_file["mask_dir"], str(self.yaml_file["train_mask"])))
+        if self.dataset is not None:
+            # Create NEW PATHS SERVER
+            self.img_dir = Path(os.path.join(self.yaml_file["img_dir"], self.yaml_file["dataset"], "partial_images"))
+            self.mask_dir = Path(os.path.join(self.yaml_file["mask_dir"], self.yaml_file["dataset"], "partial_masks"))
+
+        else:
+            # Create OLD PATHS SERVER
+            self.img_dir = Path(os.path.join(self.yaml_file["img_dir"], str(self.yaml_file["train_img"])))
+            self.mask_dir = Path(os.path.join(self.yaml_file["mask_dir"], str(self.yaml_file["train_mask"])))
+
         self.test_dir = Path(os.path.join(self.yaml_file["test_dir"]))
 
-        # image size: 2048, 1024, 512, 256
-        self.size = self.yaml_file["size"]
-        self.forest_type = self.yaml_file["train_img"]
+
+
+    def get_git_commit_hash(self):
+        """Get current git commit hash."""
+        try:
+            result = subprocess.run(
+                ['git', 'rev-parse', 'HEAD'],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            return result.stdout.strip()[:7]  # Short hash
+        except subprocess.CalledProcessError:
+            return "unknown"
+
+    def setup_logging(self):
+        """setup logging for training and validation
+        """
+        # Get git commit hash
+        git_hash = self.get_git_commit_hash()
+
+        wandb.init(
+            project=self.wandb_project,
+            name=self.exp_dir.stem,
+            job_type='ml-optimizition',
+            config={
+                # Hyperparameters
+                "learning_rate": self.lr,
+                "batch_size": self.batch_size,
+                "epochs": self.epochs,
+                "optimizer": self.optimizer_name,
+                "activation": self.activation,
+                "weight_decay": self.weight_decay,
+                "scheduler": self.lr_scheduler,
+                
+                # Model architecture
+                "model": "Unet",
+                "encoder": self.encoder,
+                "encoder_weights": "imagenet",
+                "classes": len(self.class_values),
+                
+                # Dataset info (link to your dataset artifact)
+                "dataset_name": self.dataset,
+                "dataset_version": self.dataset_info["version"],
+                
+                # Random seeds
+                "seed": self.seed,
+                "torch_seed": self.seed,
+                "numpy_seed": self.seed,
+                
+                # Data augmentation (save transform configs)
+                # "augmentations": str(train_transforms),  # or serialize to dict
+                
+                # Loss function
+                "loss_function": self.loss.__name__,
+                # "class_weights": None,
+                
+                # Environment
+                "git_commit": git_hash,
+                "cuda_version": torch.version.cuda,
+                # "gpu_type": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU",
+                # "num_workers": 4,
+            }
+        )
+
+        dataset_artifact = wandb.use_artifact(self.wandb_qualified_name, type='dataset')
+        # Save pip freeze snapshot
+        wandb.save("requirements.txt")  # if you generate it before training
 
 
     def set_non_unique_paths(self, train_split):
@@ -250,6 +294,17 @@ class Trainer():
             unique_val_imgs = shuffled_original[train_len_:train_len_ + val_len_]
             unique_pool_imgs = shuffled_original[val_len_:]
             self.unique_pool_imgs = unique_pool_imgs
+        elif self.cross_validation:
+            val_fold_size = len(unique_imgs) // self.n_folds
+            val_start = self.cross_val_run * val_fold_size
+            val_end = val_start + val_fold_size if self.cross_val_run < self.n_folds - 1 else len(unique_imgs)
+            
+            unique_val_imgs = shuffled_original[val_start:val_end]
+            unique_train_imgs = shuffled_original[:val_start] + shuffled_original[val_end:]
+            print("Val start: ", val_start)
+            print("Val end: ", val_end)
+            print("Train images: ", len(unique_train_imgs))
+            print("Val images: ", len(unique_val_imgs))
         else:
             train_len_ = int(len(unique_imgs) * train_split)
             unique_train_imgs = shuffled_original[:train_len_]
@@ -280,16 +335,25 @@ class Trainer():
             self.x_test = self.x_test[:20]
             self.y_test = [x.replace("JPG", "png").replace("img", "mask") for x in self.x_test]
 
-    def set_paths(self, train_split=0.8, train=False, test=False, pred=False):
+
+
+    def set_paths(self, cross_val_run=0, train=False, test=False, pred=False):
         """Set train, valid, test paths for images and masks.
         """
 
+        self.cross_val_run = cross_val_run
+
         if train:
             # check if exp_dir exists and create new one
-            self.exp_dir = Path(os.path.join(self.yaml_file["exp_dir"], "exp_{0}_{1}_{2}".format(self.forest_type, self.encoder, self.seed)))
-            exp_dir = Path(str(self.exp_dir) + "_" + str(uuid.uuid4())[:6])
-            while exp_dir.exists():
+            self.exp_dir = Path(os.path.join(self.yaml_file["exp_dir"], "exp_{0}_{1}_s{2}".format(self.wandb_project, self.encoder, self.seed)))
+            if self.cross_validation:
+                self.exp_dir = Path(str(self.exp_dir) + "_cv{0}_".format(self.cross_val_run))
+                # self.cross_val_exp_series = str(uuid.uuid4())[:6]
+                exp_dir = Path(str(self.exp_dir) + str(self.cross_val_exp_series))
+            else:
                 exp_dir = Path(str(self.exp_dir) + "_" + str(uuid.uuid4())[:6])
+                while exp_dir.exists():
+                    exp_dir = Path(str(self.exp_dir) + "_" + str(uuid.uuid4())[:6])
 
             self.exp_dir = exp_dir
             os.makedirs(self.exp_dir)
@@ -325,17 +389,49 @@ class Trainer():
             print("Error: No images found!")
             return None
 
-        if len(unique_imgs) < 10:
+        num_unique = 10 # 10 for training; 1000 just for data leakage test
+
+        if len(unique_imgs) < num_unique:
             print("Only {0} image found! Using non-unique images. Data leakage might be a problem...".format(len(unique_imgs)))
-            self.set_non_unique_paths(train_split)
+            self.set_non_unique_paths(self.train_split)
 
-        elif len(unique_imgs) >= 10:
+        elif len(unique_imgs) >= num_unique:
             print("Multiple images found! Using unique images to tackle data leakage")
-            self.set_unique_paths(train_split, unique_imgs)
+            self.set_unique_paths(self.train_split, unique_imgs)
 
 
+        self.check_class_distribution()
 
+    def check_class_distribution(self):
+
+        print("\n=== Class Distribution Analysis ===")
+        train_class_counts = np.zeros(len(self.class_values))
+        val_class_counts = np.zeros(len(self.class_values))
         
+        # Count training set
+        for mask_path in self.y_train:
+            mask = cv2.imread(mask_path, cv2.IMREAD_UNCHANGED)
+            for idx, class_val in enumerate(self.class_values):
+                train_class_counts[idx] += np.sum(mask == class_val)
+        
+        # Count validation set
+        for mask_path in self.y_valid:
+            mask = cv2.imread(mask_path, cv2.IMREAD_UNCHANGED)
+            for idx, class_val in enumerate(self.class_values):
+                val_class_counts[idx] += np.sum(mask == class_val)
+        
+        # Calculate percentages
+        train_total = train_class_counts.sum()
+        val_total = val_class_counts.sum()
+        
+        print(f"{'Class':<20} {'Train %':<12} {'Val %':<12} {'Ratio (T/V)':<12}")
+        print("-" * 60)
+        for idx, label in enumerate(self.labels):
+            train_pct = 100 * train_class_counts[idx] / train_total if train_total > 0 else 0
+            val_pct = 100 * val_class_counts[idx] / val_total if val_total > 0 else 0
+            ratio = train_pct / val_pct if val_pct > 0 else float('inf')
+            print(f"{label:<20} {train_pct:>6.2f}%     {val_pct:>6.2f}%     {ratio:>6.2f}x")
+        print("=" * 60 + "\n")
 
 
     def create_dataloaders(self, augmentations=True):
@@ -368,8 +464,8 @@ class Trainer():
             preprocessing=get_preprocessing(self.preprocessing_fn),
         )
 
-        self.train_loader = DataLoader(self.train_dataset, batch_size=self.train_batch_size, shuffle=True, num_workers=1)
-        self.valid_loader = DataLoader(self.valid_dataset, batch_size=self.val_batch_size, shuffle=False, num_workers=1)
+        self.train_loader = DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers)
+        self.valid_loader = DataLoader(self.valid_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
 
 
     def update_dataloaders(self, x_train):
@@ -393,7 +489,9 @@ class Trainer():
             preprocessing=get_preprocessing(self.preprocessing_fn),
         )
 
-        self.train_loader = DataLoader(self.train_dataset, batch_size=self.train_batch_size, shuffle=True, num_workers=1)
+        self.train_loader = DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers)
+
+
 
     def prepare_model(self):
         """Prepare model for loading (training or testing/predicting).
@@ -408,11 +506,34 @@ class Trainer():
             activation=self.activation,
         )
 
+        self.model = self.model.to(self.device)
 
         #  self.dice_loss = smp.losses.DiceLoss(mode='multilabel', ignore_index=[0])
         # self.dice_loss.__name__ = 'Dice_loss'
         # self.loss = self.dice_loss
 
+        if self.memory_optimized and 'mit_' in self.encoder:
+            from torch.utils.checkpoint import checkpoint
+            
+            encoder = self.model.encoder
+            
+            # Wrap each block's forward to use checkpointing
+            for block_name in ['block1', 'block2', 'block3', 'block4']:
+                block = getattr(encoder, block_name, None)
+                if block is not None:
+                    original_forward = block.forward
+                    
+                    def make_checkpointed_forward(orig_fwd):
+                        def checkpointed_forward(x):
+                            # Checkpoint each sub-block in the Sequential
+                            for sub_block in orig_fwd.__self__:
+                                x = checkpoint(sub_block, x, use_reentrant=False)
+                            return x
+                        return checkpointed_forward
+                    
+                    block.forward = make_checkpointed_forward(original_forward)
+            
+            print("Gradient checkpointing enabled for MiT encoder")
 
         
         if self.ignore_background:
@@ -430,11 +551,28 @@ class Trainer():
             smp_metrics.IoU(threshold=0.5, ignore_channels=ignore_channels),
         ]
 
-        self.optimizer = torch.optim.Adam([ 
+
+        if self.optimizer_name == "Adam":
+            self.optimizer = torch.optim.Adam([ 
+            dict(params=self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay),
+            ])
+        elif self.optimizer_name == "SGD":
+            self.optimizer = torch.optim.SGD([ 
             dict(params=self.model.parameters(), lr=self.lr),
-        ])
+            ])
+        else:
+            self.optimizer = torch.optim.Adam([ 
+            dict(params=self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay),
+            ])
 
-
+        if self.lr_scheduler == "ReduceLROnPlateau":
+            self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                self.optimizer, 
+                mode='max',           # Maximize validation IoU
+                factor=0.5,           # Cut LR in half
+                patience=20,          # Wait 20 epochs before reducing
+                verbose=True
+            )
 
         # create epoch runners 
         # it is a simple loop of iterating over dataloader`s samples
@@ -454,6 +592,9 @@ class Trainer():
             device=self.device,
             verbose=True,
         )
+
+        self.setup_logging()
+
 
     def save_model(self, epoch, update_latest=False):
         """save model to model_save_path (experiment folder + best_model.pth)
@@ -477,23 +618,40 @@ class Trainer():
         
         print("Model updated!")
 
-    def train_model(self, epochs=1, al_step=25):
+    def dry_run_loop(self):
+        for epoch in range(0, self.epochs):
+            self.train_log_df.loc[epoch] = ["dry_run", 0]
+            self.valid_log_df.loc[epoch] = ["dry_run", 0]
 
-        print("Training on {0} images".format(len(self.ids)))
-        max_score = 0
-
-        self.train_log_df = pd.DataFrame(columns=[self.loss.__name__, 'iou_score'])
-        self.valid_log_df = pd.DataFrame(columns=[self.loss.__name__, 'iou_score'])
-
-        if self.active_learning:
-            # epochs = epochs//al_step
-            print("Active Learning is enabled!")
-
-        for epoch in range(0, epochs):
+    def get_per_image_ious(self):
+            # Track per-image performance
+            print("\n=== Per-Image Validation IoU ===")
             
-            print('\n Seed {0} | Epoch: {1}/{2}'.format(self.seed, epoch, epochs))
+            image_ious = []
+            for i, (x, y) in enumerate(self.valid_loader):
+                x, y = x.to(self.device), y.to(self.device)
+                with torch.no_grad():
+                    pred = self.model(x)
+                    iou = self.metrics[0](pred, y).item()
+                    image_name = Path(self.x_valid[i]).name
+                    image_ious.append((image_name, iou))
+            
+            return image_ious
+            
+
+    def run_train_loop(self, al_step=25):
+        max_score = 0
+        self.image_iou_df = pd.DataFrame({'image': [Path(x).stem for x in self.x_valid]})
+        self.image_iou_csv_path = os.path.join(self.exp_dir, "per_image_iou_tracking.csv")
+
+        for epoch in range(0, self.epochs):
+            
+            print('\n Seed {0} | Epoch: {1}/{2}'.format(self.seed, epoch, self.epochs))
             self.train_logs = self.train_epoch.run(self.train_loader)
             self.valid_logs = self.valid_epoch.run(self.valid_loader)
+
+            image_ious = self.get_per_image_ious()
+
 
             if self.active_learning and (epoch+1)%al_step == 0:
                 train_img_sorted = self.calculate_uncertainty_scores()
@@ -504,6 +662,15 @@ class Trainer():
             if max_score < self.valid_logs['iou_score']:
                 print('New top score: {0} > {1} '.format(self.valid_logs['iou_score'], max_score))
                 max_score = self.valid_logs['iou_score']
+
+                epoch_ious = {name: iou for name, iou in image_ious}
+                self.image_iou_df[f'epoch_{epoch}'] = self.image_iou_df['image'].map(epoch_ious)
+                self.image_iou_df.to_csv(self.image_iou_csv_path, index=False)
+
+                wandb.log({
+                    "val/per_image_ious": wandb.Table(dataframe=self.image_iou_df),
+                })
+
                 # torch.save(self.model, self.model_save_path)
                 self.save_model(epoch=epoch)
                 self.save_loss_plots()
@@ -512,23 +679,140 @@ class Trainer():
                 if self.save_val_uncertainty:
                     self.save_uncertainty_images(epoch)
 
-
-            # if (i+1)%25 == 0:
-                # self.lr_count += 1
-                # self.lr = self.lr_schedule[self.lr_count]
-                # self.optimizer.param_groups[0]['lr'] = self.lr
-                # print('Decrease decoder learning rate to {0}!'.format(self.lr))
-
-
-            
             self.train_log_df.loc[epoch] = [self.train_logs[self.loss.__name__], self.train_logs['iou_score']]
             self.valid_log_df.loc[epoch] = [self.valid_logs[self.loss.__name__], self.valid_logs['iou_score']]
+
+
+            iou_values = [iou for _, iou in image_ious]
+            image_ious_sorted = sorted(image_ious, key=lambda x: x[1])
+
+            pd.DataFrame(image_ious, columns=['image', 'iou']).to_csv(
+                os.path.join(self.exp_dir, f"image_ious_epoch_{epoch}.csv"),
+                index=False
+)
+
+            wandb.log({
+                "epoch": epoch,
+                "train/loss": self.train_logs[self.loss.__name__],  # or however your loss is named
+                "train/iou": self.train_logs["iou_score"],  # default smp metric name
+                "val/loss": self.valid_logs[self.loss.__name__],
+                "val/iou": self.valid_logs["iou_score"],
+                "learning_rate": self.optimizer.param_groups[0]['lr'],
+                # Per-image IoU statistics
+                "val/iou_min": min(iou_values),
+                "val/iou_max": max(iou_values),
+                "val/iou_std": np.std(iou_values),
+                "val/worst_image": f"{image_ious_sorted[0][0]}: {image_ious_sorted[0][1]:.3f}",
+                "val/best_image": f"{image_ious_sorted[-1][0]}: {image_ious_sorted[-1][1]:.3f}",
+            })
+
+            self.scheduler.step(self.valid_logs['iou_score'])
+
+
+
+    def run_optimized_train_loop(self, al_step=25):
+        max_score = 0
+        scaler = torch.cuda.amp.GradScaler()
+
+        print(f"Model parameters: {sum(p.numel() for p in self.model.parameters()) / 1e6:.1f}M")
+        # x_test = torch.randn(1, 3, 1024, 1024).to(self.device)
+        # with torch.cuda.amp.autocast():
+        #     _ = self.model(x_test)
+        # print(f"After forward: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+        # del x_test
+        # torch.cuda.empty_cache()
+
+        for epoch in range(self.epochs):
+            print(f'\n Seed {self.seed} | Epoch: {epoch}/{self.epochs}')
+            
+            # === TRAINING ===
+            self.model.train()
+            train_loss_sum = 0
+            train_iou_sum = 0
+            
+            for x, y in tqdm(self.train_loader, desc='train'):
+                x, y = x.to(self.device), y.to(self.device)
+                self.optimizer.zero_grad()
+                
+                with torch.cuda.amp.autocast():
+                    pred = self.model(x)
+                    loss = self.loss(pred, y)
+                
+                scaler.scale(loss).backward()
+                scaler.step(self.optimizer)
+                scaler.update()
+                
+                train_loss_sum += loss.item()
+                train_iou_sum += self.metrics[0](pred, y).item()
+            
+            # === VALIDATION ===
+            self.model.eval()
+            val_loss_sum = 0
+            val_iou_sum = 0
+            
+            with torch.no_grad():
+                for x, y in tqdm(self.valid_loader, desc='valid'):
+                    x, y = x.to(self.device), y.to(self.device)
+                    with torch.cuda.amp.autocast():
+                        pred = self.model(x)
+                        loss = self.loss(pred, y)
+                    val_loss_sum += loss.item()
+                    val_iou_sum += self.metrics[0](pred, y).item()
+            
+            # === LOGGING ===
+            self.train_logs = {
+                self.loss.__name__: train_loss_sum / len(self.train_loader),
+                'iou_score': train_iou_sum / len(self.train_loader)
+            }
+            self.valid_logs = {
+                self.loss.__name__: val_loss_sum / len(self.valid_loader),
+                'iou_score': val_iou_sum / len(self.valid_loader)
+            }
+            
+            if max_score < self.valid_logs['iou_score']:
+                print(f'New top score: {self.valid_logs["iou_score"]:.4f} > {max_score:.4f}')
+                max_score = self.valid_logs['iou_score']
+                self.save_model(epoch=epoch)
+                self.save_loss_plots()
+                self.save_confusion_matrix(epoch=epoch)
+                if self.save_val_uncertainty:
+                    self.save_uncertainty_images(epoch)
+
+            self.train_log_df.loc[epoch] = [self.train_logs[self.loss.__name__], self.train_logs['iou_score']]
+            self.valid_log_df.loc[epoch] = [self.valid_logs[self.loss.__name__], self.valid_logs['iou_score']]
+
+    def train_model(self, al_step=25, dry_run=False):
+
+        torch.cuda.empty_cache()
+
+        print("Training on {0} images".format(len(self.ids)))
+        if self.cross_validation:
+            print("Cross validation is enabled!")
+            print("Cross val run: ", self.cross_val_run)
+
+        self.train_log_df = pd.DataFrame(columns=[self.loss.__name__, 'iou_score'])
+        self.valid_log_df = pd.DataFrame(columns=[self.loss.__name__, 'iou_score'])
+
+        if self.active_learning:
+            # epochs = epochs//al_step
+            print("Active Learning is enabled!")
+
+
+        if not dry_run:
+            if self.memory_optimized:
+                self.run_optimized_train_loop(al_step=al_step)
+            else:
+                self.run_train_loop(al_step=al_step)
+            self.save_loss_plots()
+        elif dry_run:
+            print("Dry run for testing...")
+            self.dry_run_loop()
+
 
 
         self.train_log_df.to_csv(os.path.join(self.exp_dir, "train_log.csv"))
         self.valid_log_df.to_csv(os.path.join(self.exp_dir, "valid_log.csv"))
 
-        self.save_loss_plots()
 
     def save_confusion_matrix(self, epoch):
         cf_matrix = np.zeros((len(self.class_values), len(self.class_values)))
@@ -580,7 +864,7 @@ class Trainer():
 
         ax[1].plot(self.train_log_df.index, self.train_log_df['iou_score'], label='train iou score')
         ax[1].plot(self.valid_log_df.index, self.valid_log_df['iou_score'], label='valid iou score')
-        ax[1].set_ylim(0.6, 1.0)
+        # ax[1].set_ylim(0.6, 1.0)
         ax[1].grid()
         ax[1].legend()
 
@@ -674,15 +958,23 @@ class Trainer():
         print("Loading checkpoint from: ")
         if not self.pred:
             print(self.model_save_path)
-            checkpoint = torch.load(self.model_save_path)
+            # checkpoint = torch.load(self.model_save_path)
+            checkpoint = torch.load(self.model_save_path, map_location=self.device)
         elif self.pred:
             print(self.best_model_path)
-            checkpoint = torch.load(self.best_model_path)
+            # checkpoint = torch.load(self.best_model_path)
+            checkpoint = torch.load(self.model_save_path, map_location=self.device)
         print("Checkpoint loaded!")
         self.print_summary(checkpoint)
         self.prepare_model()
         self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        # self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+        # Only load optimizer state for training, not for prediction
+        if not self.pred:
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            print("Optimizer state loaded!")
+
         print("Model loaded!")
 
         if not self.best_model_path == None:
@@ -1006,6 +1298,15 @@ class Trainer():
         """
 
         # self.set_pdf_path_pred()
+        
+        # GPU Memory Debug
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            print("\n=== GPU Memory Before Loading Model ===")
+            print(f"Allocated: {torch.cuda.memory_allocated(0)/1024**3:.2f} GB")
+            print(f"Reserved: {torch.cuda.memory_reserved(0)/1024**3:.2f} GB")
+            print("=" * 40 + "\n")
+
         self.load_model()
 
         # self.test_dir = Path("C:\\Users\\faulhamm\\Documents\\Philipp\\Code\\cc-machine-learning\\test")
@@ -1037,6 +1338,8 @@ def parse_args():
     parser.add_argument('--mode', default='train', type=str, help='mode: "train" for training model \n "test" for testing with ground truth and save results to pdf file \n "predict" for predicting whole images and save prediction mask', required=False)
     parser.add_argument('--encoders', action="append", type=str, help='list of encoders to train/test/predict', required=False)
     parser.add_argument('--config', default='server_local_debug.yml', type=str, help='config file for training/testing/predicting', required=True)
+    parser.add_argument('--cross_val_run', default=0, type=int, help='cross validation run index (0...n)', required=False)
+    parser.add_argument('--memory_optimized', action='store_true', help='enable memory optimized training with gradient checkpointing and 8-bit optimizer', required=False)
     args = parser.parse_args()
     return args
 
@@ -1046,7 +1349,9 @@ if __name__ == "__main__":
     # encoder_list = ['mit_b0', 'efficientnet-b3', 'efficientnet-b7', 'vgg16', 'resnet50']
     # encoder_list = ['mit_b1', 'mit_b3', 'mit_b5']
 
-    seeds = [30]
+    seed = 10
+    n_folds = 5
+    train_split = (n_folds - 1)/n_folds
     
     args = parse_args()
 
@@ -1055,30 +1360,42 @@ if __name__ == "__main__":
     encoder_list = args.encoders
     default_encoder = 'mit_b5'
     config_file = args.config
+    cross_val_run = args.cross_val_run
+    cross_val_exp_series = str(uuid.uuid4())[:6]
+    memory_optimized = args.memory_optimized
 
     print(encoder_list)
 
     if args.mode == 'train':
         print("Training mode...")
-        trainer = Trainer(active_learning=False, save_val_uncertainty=False, config_file=config_file) # create Trainer object, load config & set default values
+        print(f"Memory optimized: {memory_optimized}")
+        trainer = Trainer(active_learning=False,
+                          epochs=300,
+                          save_val_uncertainty=False,
+                          train_split=train_split,
+                          cross_validation=True,
+                          config_file=config_file,
+                          n_folds=n_folds,
+                          cross_val_exp_series=cross_val_exp_series,
+                          memory_optimized=memory_optimized) # create Trainer object, load config & set default values
         for encoder in encoder_list:
             trainer.set_encoder(encoder) # set encoder for model
-            for seed in seeds:
-                print("Train: ", encoder, "\n")
-                print("Seed: ", seed, "\n")
-                trainer.set_seed(seed) # set seed for reproducibility
-
-                trainer.set_paths(train_split=0.8, train=True) # set paths for training
-                trainer.create_dataloaders(augmentations=True) # create dataloaders from image and mask paths
-                trainer.prepare_model() # create Unet object and loss & metric objects and Training/Validation Epoch Runners
-                trainer.train_model(epochs=400) # start training routine using Training/Validation Epoch Runners
-                trainer.test_model()
+            # for cross_val_run in range(1, n_folds+1):
+            print("Train: ", encoder, "\n")
+            print("Cross Val Run: ", cross_val_run, "\n")
+            trainer.set_seed(seed) # set seed for reproducibility
+            trainer.set_paths(cross_val_run, train=True) # set paths for training
+            
+            trainer.create_dataloaders(augmentations=True) # create dataloaders from image and mask paths
+            trainer.prepare_model() # create Unet object and loss & metric objects and Training/Validation Epoch Runners
+            trainer.train_model() # start training routine using Training/Validation Epoch Runners
+            # trainer.test_model()
     
     elif args.mode == 'test':
         # for encoder in encoder_list:
         encoder = 'mit_b5'
         print("Test: ", encoder, "\n")
-        trainer = Trainer(encoder=encoder, seed=seeds[0], config_file=config_file) # create Trainer object and set default values
+        trainer = Trainer(encoder=encoder, seed=seed, config_file=config_file) # create Trainer object and set default values
         trainer.set_paths() # set paths for testing (not recently tested)
         trainer.test_model() # test model
 
@@ -1096,7 +1413,7 @@ if __name__ == "__main__":
 
 
         print("Predict: ", encoder, "\n")
-        trainer = Trainer(encoder=encoder, seed=seeds[0], pred=True, config_file=config_file)
+        trainer = Trainer(encoder=encoder, seed=seed, pred=True, config_file=config_file)
         trainer.set_paths(pred=True)
         trainer.predict(save_entropies=True)
 
