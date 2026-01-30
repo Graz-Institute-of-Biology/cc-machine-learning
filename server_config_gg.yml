@@ -2,7 +2,7 @@ img_dir : '/usr/people/EDVZ/faulhamm/cc-machine-learning/img'
 test_dir : '/usr/people/EDVZ/faulhamm/cc-machine-learning/test_gg'
 mask_dir : '/usr/people/EDVZ/faulhamm/cc-machine-learning/mask'
 exp_dir : '/usr/people/EDVZ/faulhamm/cc-machine-learning/experiments'
-best_model_path : '/usr/people/EDVZ/faulhamm/cc-machine-learning/experiments/exp_g_mit_b5_20_94527b/best_model.pth'
+best_model_path : '/usr/people/EDVZ/faulhamm/cc-machine-learning/experiments/exp_gg_mit_b5_30_e89f4a/best_model.pth'
 train_img : 'gg'
 train_mask : 'gg'
 size : 1024
