@@ -1,13 +1,14 @@
 {
     "ontology": {
         "background": {"value": 0, "color": "#000000"},
-        "cyano_-_dominated": {"value": 1, "color": "#1CE6FF"},
+        "cyano - dominated": {"value": 1, "color": "#1CE6FF"},
         "lichen": {"value": 2, "color": "#ffdb0c"},
         "moss": {"value": 3, "color": "#FF4A46"},
         "vascular plants": {"value": 4, "color": "#008941"},
         "rock": {"value": 5, "color": "#dc22e6"},
         "other": {"value": 6, "color": "#B79762"},
         "fungi": {"value": 7, "color": "#7A4900"},
-        "markers": {"value": 8, "color": "#FFDBE5"}
+        "markers": {"value": 8, "color": "#FFDBE5"},
+        "snow": {"value": 9, "color": "#8FB0FF"}
     }
 }
