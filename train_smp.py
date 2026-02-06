@@ -701,6 +701,9 @@ class Trainer():
             self.train_log_df.loc[epoch] = [self.train_logs[self.loss.__name__], self.train_logs['iou_score']]
             self.valid_log_df.loc[epoch] = [self.valid_logs[self.loss.__name__], self.valid_logs['iou_score']]
 
+            self.train_log_df.to_csv(os.path.join(self.exp_dir, "train_log.csv"))
+            self.valid_log_df.to_csv(os.path.join(self.exp_dir, "valid_log.csv"))
+
 
             # iou_values = [iou for _, iou in image_ious]
             # image_ious_sorted = sorted(image_ious, key=lambda x: x[1])
