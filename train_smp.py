@@ -48,7 +48,6 @@ class Trainer():
                  device='cuda', 
                  size=1024, 
                  pred=False, 
-                 active_learning=False,
                  cross_validation=False,
                  n_folds=0,
                  save_val_uncertainty=False,
@@ -60,7 +59,7 @@ class Trainer():
         self.pred = pred
         self.seed = seed
         self.dataset = None
-        self.active_learning=active_learning
+        self.research_site = None
         self.save_val_uncertainty = save_val_uncertainty
         self.ignore_background = True
         self.config_file = config_file
@@ -78,9 +77,6 @@ class Trainer():
         else:
             self.num_workers = 1
 
-
-        if self.active_learning:
-            self.save_val_uncertainty = True
         
         if load_config:
             self.ontology_file_name = None
@@ -142,6 +138,10 @@ class Trainer():
             self.wandb_project = self.dataset_info["wandb_project"]
             self.wandb_logged_artifact = self.dataset_info["logged_artifact"]
             self.wandb_qualified_name = self.dataset_info["qualified_name"]
+
+            if self.ontology_name == "atto":
+                self.research_site = self.wandb_logged_artifact.split("_")[1]
+                print("Research site: ", self.research_site)
 
     def load_config(self):
         """ load server config by default, if not available load local config
@@ -282,22 +282,12 @@ class Trainer():
         self.x_test = self.x_valid
         self.y_test = self.y_valid
 
-    def set_unique_paths(self, train_split, unique_imgs):
-        shuffled_original = unique_imgs.copy()
-        np.random.shuffle(shuffled_original)
 
-        if self.active_learning:
-            train_split = 0.1
-            train_len_ = int(len(unique_imgs) * train_split)
-            val_len_ = int(train_len_*2)
-            unique_train_imgs = shuffled_original[:train_len_]
-            unique_val_imgs = shuffled_original[train_len_:train_len_ + val_len_]
-            unique_pool_imgs = shuffled_original[val_len_:]
-            self.unique_pool_imgs = unique_pool_imgs
-        elif self.cross_validation:
-            val_fold_size = len(unique_imgs) // self.n_folds
+    def split_train_val(self, shuffled_original):
+
+            val_fold_size = len(shuffled_original) // self.n_folds
             val_start = self.cross_val_run * val_fold_size
-            val_end = val_start + val_fold_size if self.cross_val_run < self.n_folds - 1 else len(unique_imgs)
+            val_end = val_start + val_fold_size if self.cross_val_run < self.n_folds - 1 else len(shuffled_original)
             
             unique_val_imgs = shuffled_original[val_start:val_end]
             unique_train_imgs = shuffled_original[:val_start] + shuffled_original[val_end:]
@@ -305,11 +295,53 @@ class Trainer():
             print("Val end: ", val_end)
             print("Train images: ", len(unique_train_imgs))
             print("Val images: ", len(unique_val_imgs))
+
+            return unique_train_imgs, unique_val_imgs
+
+
+    def get_mixed_train_val_imgs(self, sorted_unique_imgs):
+
+        campina_imgs = [x for x in sorted_unique_imgs if x.split("_")[1] == "C"]
+        terra_firme_imgs = [x for x in sorted_unique_imgs if x.split("_")[1] == "TF"]
+
+        np.random.shuffle(campina_imgs)
+        np.random.shuffle(terra_firme_imgs)
+
+        tf_shuffled_unique_train_imgs, tf_shuffled_unique_val_imgs = self.split_train_val(terra_firme_imgs)
+        c_shuffled_unique_train_imgs, c_shuffled_unique_val_imgs = self.split_train_val(campina_imgs)
+
+        unique_train_imgs = tf_shuffled_unique_train_imgs + c_shuffled_unique_train_imgs
+        unique_val_imgs = tf_shuffled_unique_val_imgs + c_shuffled_unique_val_imgs
+
+        return unique_train_imgs, unique_val_imgs
+
+
+
+    def get_train_val_imgs(self, sorted_unique_imgs, train_split):
+        
+        shuffled_original = sorted_unique_imgs.copy()
+        np.random.shuffle(shuffled_original)
+
+
+        if self.cross_validation:
+            unique_train_imgs, unique_val_imgs = self.split_train_val(shuffled_original)
         else:
-            train_len_ = int(len(unique_imgs) * train_split)
+            train_len_ = int(len(sorted_unique_imgs) * train_split)
             unique_train_imgs = shuffled_original[:train_len_]
             unique_val_imgs = shuffled_original[train_len_:]
 
+        return unique_train_imgs, unique_val_imgs
+
+    def set_unique_paths(self, train_split, sorted_unique_imgs):
+
+        if self.research_site == "mixed":
+            unique_train_imgs, unique_val_imgs = self.get_mixed_train_val_imgs(sorted_unique_imgs, train_split)
+        
+        else:
+            unique_train_imgs, unique_val_imgs = self.get_train_val_imgs(sorted_unique_imgs, train_split)
+
+        self.unique_train_imgs = unique_train_imgs
+        self.unique_val_imgs = unique_val_imgs
 
         self.x_train = [os.path.join(self.img_dir, x) for x in self.ids if x.split("_part")[0] in unique_train_imgs]
 
@@ -327,13 +359,6 @@ class Trainer():
 
         self.x_test = self.x_valid.copy()
         self.y_test = self.y_valid.copy()
-
-        if self.active_learning:
-            self.x_pool = [os.path.join(self.img_dir, x) for x in self.ids if x.split("_part")[0] in unique_pool_imgs]
-            self.y_pool = [os.path.join(self.mask_dir, x.replace("JPG", "png")) for x in self.ids if x.split("_part")[0] in unique_pool_imgs]
-            np.random.shuffle(self.x_test)
-            self.x_test = self.x_test[:20]
-            self.y_test = [x.replace("JPG", "png").replace("img", "mask") for x in self.x_test]
 
 
 
@@ -383,21 +408,21 @@ class Trainer():
 
         # get unique image names
         original_imgs = [x.split("_part")[0] for x in self.ids]
-        unique_imgs = sorted(np.unique(original_imgs))
-        print(unique_imgs)
-        if len(unique_imgs) == 0:
+        sorted_unique_imgs = sorted(np.unique(original_imgs))
+        print(sorted_unique_imgs)
+        if len(sorted_unique_imgs) == 0:
             print("Error: No images found!")
             return None
 
         num_unique = 10 # 10 for training; 1000 just for data leakage test
 
-        if len(unique_imgs) < num_unique:
-            print("Only {0} image found! Using non-unique images. Data leakage might be a problem...".format(len(unique_imgs)))
+        if len(sorted_unique_imgs) < num_unique:
+            print("Only {0} image found! Using non-unique images. Data leakage might be a problem...".format(len(sorted_unique_imgs)))
             self.set_non_unique_paths(self.train_split)
 
-        elif len(unique_imgs) >= num_unique:
+        elif len(sorted_unique_imgs) >= num_unique:
             print("Multiple images found! Using unique images to tackle data leakage")
-            self.set_unique_paths(self.train_split, unique_imgs)
+            self.set_unique_paths(self.train_split, sorted_unique_imgs)
 
 
         self.check_class_distribution()
@@ -650,26 +675,20 @@ class Trainer():
             self.train_logs = self.train_epoch.run(self.train_loader)
             self.valid_logs = self.valid_epoch.run(self.valid_loader)
 
-            image_ious = self.get_per_image_ious()
-
-
-            if self.active_learning and (epoch+1)%al_step == 0:
-                train_img_sorted = self.calculate_uncertainty_scores()
-                if not train_img_sorted == None:
-                    self.update_dataloaders(train_img_sorted)
+            # image_ious = self.get_per_image_ious()
             
             # do something (save model, change lr, etc.)
             if max_score < self.valid_logs['iou_score']:
                 print('New top score: {0} > {1} '.format(self.valid_logs['iou_score'], max_score))
                 max_score = self.valid_logs['iou_score']
 
-                epoch_ious = {name: iou for name, iou in image_ious}
-                self.image_iou_df[f'epoch_{epoch}'] = self.image_iou_df['image'].map(epoch_ious)
-                self.image_iou_df.to_csv(self.image_iou_csv_path, index=False)
+                # epoch_ious = {name: iou for name, iou in image_ious}
+                # self.image_iou_df[f'epoch_{epoch}'] = self.image_iou_df['image'].map(epoch_ious)
+                # self.image_iou_df.to_csv(self.image_iou_csv_path, index=False)
 
-                wandb.log({
-                    "val/per_image_ious": wandb.Table(dataframe=self.image_iou_df),
-                })
+                # wandb.log({
+                #     "val/per_image_ious": wandb.Table(dataframe=self.image_iou_df),
+                # })
 
                 # torch.save(self.model, self.model_save_path)
                 self.save_model(epoch=epoch)
@@ -683,27 +702,27 @@ class Trainer():
             self.valid_log_df.loc[epoch] = [self.valid_logs[self.loss.__name__], self.valid_logs['iou_score']]
 
 
-            iou_values = [iou for _, iou in image_ious]
-            image_ious_sorted = sorted(image_ious, key=lambda x: x[1])
+            # iou_values = [iou for _, iou in image_ious]
+            # image_ious_sorted = sorted(image_ious, key=lambda x: x[1])
 
-            pd.DataFrame(image_ious, columns=['image', 'iou']).to_csv(
-                os.path.join(self.exp_dir, f"image_ious_epoch_{epoch}.csv"),
-                index=False
-)
+            # pd.DataFrame(image_ious, columns=['image', 'iou']).to_csv(
+            #     os.path.join(self.exp_dir, f"image_ious_epoch_{epoch}.csv"),
+            #     index=False
+            #     )
 
             wandb.log({
                 "epoch": epoch,
-                "train/loss": self.train_logs[self.loss.__name__],  # or however your loss is named
-                "train/iou": self.train_logs["iou_score"],  # default smp metric name
+                "train/loss": self.train_logs[self.loss.__name__],
+                "train/iou": self.train_logs["iou_score"],
                 "val/loss": self.valid_logs[self.loss.__name__],
                 "val/iou": self.valid_logs["iou_score"],
                 "learning_rate": self.optimizer.param_groups[0]['lr'],
                 # Per-image IoU statistics
-                "val/iou_min": min(iou_values),
-                "val/iou_max": max(iou_values),
-                "val/iou_std": np.std(iou_values),
-                "val/worst_image": f"{image_ious_sorted[0][0]}: {image_ious_sorted[0][1]:.3f}",
-                "val/best_image": f"{image_ious_sorted[-1][0]}: {image_ious_sorted[-1][1]:.3f}",
+                # "val/iou_min": min(iou_values),
+                # "val/iou_max": max(iou_values),
+                # "val/iou_std": np.std(iou_values),
+                # "val/worst_image": f"{image_ious_sorted[0][0]}: {image_ious_sorted[0][1]:.3f}",
+                # "val/best_image": f"{image_ious_sorted[-1][0]}: {image_ious_sorted[-1][1]:.3f}",
             })
 
             self.scheduler.step(self.valid_logs['iou_score'])
@@ -792,10 +811,6 @@ class Trainer():
 
         self.train_log_df = pd.DataFrame(columns=[self.loss.__name__, 'iou_score'])
         self.valid_log_df = pd.DataFrame(columns=[self.loss.__name__, 'iou_score'])
-
-        if self.active_learning:
-            # epochs = epochs//al_step
-            print("Active Learning is enabled!")
 
 
         if not dry_run:
@@ -1339,7 +1354,7 @@ def parse_args():
     parser.add_argument('--encoders', action="append", type=str, help='list of encoders to train/test/predict', required=False)
     parser.add_argument('--config', default='server_local_debug.yml', type=str, help='config file for training/testing/predicting', required=True)
     parser.add_argument('--cross_val_run', default=0, type=int, help='cross validation run index (0...n)', required=False)
-    parser.add_argument('--epochs', default=300, type=int, help='number of training epochs', required=False)
+    parser.add_argument('--epochs', default=600, type=int, help='number of training epochs', required=False)
     parser.add_argument('--memory_optimized', action='store_true', help='enable memory optimized training with gradient checkpointing and 8-bit optimizer', required=False)
     args = parser.parse_args()
     return args
@@ -1372,8 +1387,7 @@ if __name__ == "__main__":
         print("Training mode...")
         print(f"Memory optimized: {memory_optimized}")
         print(f"Number of epochs: {epochs}")
-        trainer = Trainer(active_learning=False,
-                          epochs=epochs,
+        trainer = Trainer(epochs=epochs,
                           save_val_uncertainty=False,
                           train_split=train_split,
                           cross_validation=True,
