@@ -39,9 +39,10 @@ class RecordingWeightedSampler(WeightedRandomSampler):
 class FocalLossIgnoreBackground(torch.nn.Module):
     """Focal loss that ignores pixels where all target channels are zero (background).
 
-    Background pixels create conflicting gradients with softmax2d activation because
-    softmax outputs always sum to 1, yet background targets are all-zero.
-    Only foreground pixels (at least one active class channel) are used for the loss.
+    Used when ignore_background=True (no background channel in the model).
+    All-zero target pixels would otherwise push every foreground logit down on
+    the majority of the image, swamping the sparse foreground signal.
+    Expects y_pred as logits — FocalLoss(multilabel) applies logsigmoid internally.
     """
     __name__ = 'Focal_loss'
 
@@ -66,6 +67,7 @@ class IoUIgnoreBackground(torch.nn.Module):
     Background pixels can create false positives when the softmax output exceeds the
     threshold for any class. Zeroing out predictions on background pixels eliminates
     these spurious false positives without affecting TP or FN counts.
+    Expects y_pred as logits — applies softmax internally.
     """
     __name__ = 'iou_score'
 
@@ -74,6 +76,7 @@ class IoUIgnoreBackground(torch.nn.Module):
         self._iou = smp_metrics.IoU(threshold=threshold)
 
     def forward(self, y_pred, y_true):
+        y_pred = torch.softmax(y_pred, dim=1)
         fg_mask = (y_true.sum(dim=1, keepdim=True) > 0).float()  # (B, 1, H, W)
         # Zero out predictions on background pixels so they cannot become false positives
         return self._iou(y_pred * fg_mask, y_true)
@@ -85,6 +88,7 @@ class MultiClassFocalLoss(torch.nn.Module):
     down-weights easy (typically background) pixels, so they stop drowning out
     foreground gradient without the model losing its ability to predict background.
     Converts one-hot targets (B, C, H, W) -> class-index maps (B, H, W).
+    Expects y_pred as logits — FocalLoss(multiclass) applies log_softmax internally.
     """
     __name__ = 'Focal_loss'
 
@@ -101,6 +105,7 @@ class IoUForegroundOnly(torch.nn.Module):
     """IoU over foreground channels only (excludes channel 0 = background).
     Keeps the reported metric comparable to IoUIgnoreBackground while the model
     is trained on all classes including background.
+    Expects y_pred as logits — applies softmax internally.
     """
     __name__ = 'iou_score'
 
@@ -109,6 +114,7 @@ class IoUForegroundOnly(torch.nn.Module):
         self._iou = smp_metrics.IoU(threshold=threshold)
 
     def forward(self, y_pred, y_true):
+        y_pred = torch.softmax(y_pred, dim=1)
         return self._iou(y_pred[:, 1:], y_true[:, 1:])
 
 
@@ -116,6 +122,7 @@ class IoUBackgroundOnly(torch.nn.Module):
     """IoU over the background channel only (channel 0). Reported alongside
     the foreground IoU so the model's background-vs-foreground behavior is
     visible without contaminating the main model-selection metric.
+    Expects y_pred as logits — applies softmax internally.
     """
     __name__ = 'iou_background'
 
@@ -124,6 +131,7 @@ class IoUBackgroundOnly(torch.nn.Module):
         self._iou = smp_metrics.IoU(threshold=threshold)
 
     def forward(self, y_pred, y_true):
+        y_pred = torch.softmax(y_pred, dim=1)
         return self._iou(y_pred[:, :1], y_true[:, :1])
 
 
@@ -194,7 +202,12 @@ class Trainer():
         # model settings
         self.encoder = encoder
         self.encoder_weights = encoder_weights
-        self.activation = 'softmax2d'
+        # activation=None so the model returns logits. smp's FocalLoss
+        # (multiclass/multilabel) applies log_softmax/logsigmoid internally;
+        # pre-applying softmax would double-activate and flatten gradients.
+        # Softmax is applied explicitly where probabilities are needed
+        # (IoU metric wrappers and inference helpers).
+        self.activation = None
         self.optimizer_name = optimizer_name
         self.batch_size = batch_size
         self.lr = 1e-4
@@ -1391,7 +1404,8 @@ class Trainer():
             gt_mask = gt_mask.squeeze()
             
             x_tensor = torch.from_numpy(image).to(self.device).unsqueeze(0)
-            pr_mask = self.model.predict(x_tensor)
+            with torch.no_grad():
+                pr_mask = torch.softmax(self.model(x_tensor), dim=1)
             pr_mask = (pr_mask.squeeze().cpu().numpy().round())
             
             self.save_images_to_pdf(
@@ -1507,7 +1521,10 @@ class Trainer():
     def get_model_output(self, img):
         x_tensor = torch.from_numpy(img).to(self.device).unsqueeze(0)
         self.model.eval()
-        pr_mask = self.model.predict(x_tensor)
+        # model returns logits (activation=None); apply softmax here so
+        # downstream code (.round(), entropy) sees probabilities.
+        with torch.no_grad():
+            pr_mask = torch.softmax(self.model(x_tensor), dim=1)
 
         return pr_mask
 
