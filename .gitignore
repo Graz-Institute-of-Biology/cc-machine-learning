@@ -10,6 +10,8 @@ env.yaml
 /configs
 /comp
 /samples
+/data_transfer
+settings.local.json
 *.pdf
 *.yaml
 *.pth

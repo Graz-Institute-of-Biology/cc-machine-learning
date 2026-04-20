@@ -1,10 +1,11 @@
-img_dir : '/usr/people/EDVZ/faulhamm/cc-machine-learning/img'
-test_dir : '/usr/people/EDVZ/faulhamm/cc-machine-learning/test_gg'
-mask_dir : '/usr/people/EDVZ/faulhamm/cc-machine-learning/mask'
+img_dir : '/usr/people/EDVZ/faulhamm/cc-machine-learning/datasets'
+test_dir : '/usr/people/EDVZ/faulhamm/cc-machine-learning/test_gg_june_2025'
+mask_dir : '/usr/people/EDVZ/faulhamm/cc-machine-learning/datasets'
 exp_dir : '/usr/people/EDVZ/faulhamm/cc-machine-learning/experiments'
 best_model_path : '/usr/people/EDVZ/faulhamm/cc-machine-learning/experiments/exp_gg_mit_b5_30_e89f4a/best_model.pth'
-train_img : 'gg'
-train_mask : 'gg'
+train_img : 'img'
+train_mask : 'mask'
+dataset: 'dataset_v10_0_gg'
 size : 1024
 ontology : 'gg'
 use_gpu : true
