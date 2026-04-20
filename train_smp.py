@@ -1,13 +1,9 @@
 import subprocess
 import os
-# os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-# import keras.backend as K
-# K.set_image_data_format('channels_first')
-
 import numpy as np
 import cv2
 import matplotlib.pyplot as plt
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from smp_dataset import Dataset
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 from sklearn.preprocessing import normalize
@@ -29,6 +25,106 @@ from training_helper import get_preprocessing, get_training_augmentation, get_va
 ssl._create_default_https_context = ssl._create_unverified_context
 import json
 import wandb
+import sys
+
+
+class RecordingWeightedSampler(WeightedRandomSampler):
+    """WeightedRandomSampler that records the drawn indices for post-epoch analysis."""
+
+    def __iter__(self):
+        self.last_indices = list(super().__iter__())
+        return iter(self.last_indices)
+
+
+class FocalLossIgnoreBackground(torch.nn.Module):
+    """Focal loss that ignores pixels where all target channels are zero (background).
+
+    Background pixels create conflicting gradients with softmax2d activation because
+    softmax outputs always sum to 1, yet background targets are all-zero.
+    Only foreground pixels (at least one active class channel) are used for the loss.
+    """
+    __name__ = 'Focal_loss'
+
+    def __init__(self):
+        super().__init__()
+        self._focal = smp.losses.FocalLoss(mode='multilabel')
+
+    def forward(self, y_pred, y_true):
+        # y_true: (B, C, H, W) one-hot; background pixels have all channels = 0
+        fg_mask = y_true.sum(dim=1) > 0  # (B, H, W)
+        if not fg_mask.any():
+            return torch.tensor(0.0, device=y_pred.device, requires_grad=True)
+        # Select only foreground pixels and reshape to (N_fg, C, 1, 1) for SMP loss
+        y_pred_fg = y_pred.permute(0, 2, 3, 1)[fg_mask].unsqueeze(-1).unsqueeze(-1)
+        y_true_fg = y_true.permute(0, 2, 3, 1)[fg_mask].unsqueeze(-1).unsqueeze(-1)
+        return self._focal(y_pred_fg, y_true_fg)
+
+
+class IoUIgnoreBackground(torch.nn.Module):
+    """IoU metric that ignores background pixels (where all target channels are zero).
+
+    Background pixels can create false positives when the softmax output exceeds the
+    threshold for any class. Zeroing out predictions on background pixels eliminates
+    these spurious false positives without affecting TP or FN counts.
+    """
+    __name__ = 'iou_score'
+
+    def __init__(self, threshold=0.5):
+        super().__init__()
+        self._iou = smp_metrics.IoU(threshold=threshold)
+
+    def forward(self, y_pred, y_true):
+        fg_mask = (y_true.sum(dim=1, keepdim=True) > 0).float()  # (B, 1, H, W)
+        # Zero out predictions on background pixels so they cannot become false positives
+        return self._iou(y_pred * fg_mask, y_true)
+
+
+class MultiClassFocalLoss(torch.nn.Module):
+    """Focal loss in multiclass mode. Background is trained as an explicit class
+    rather than being masked out of the loss — focal's (1-p)^gamma term
+    down-weights easy (typically background) pixels, so they stop drowning out
+    foreground gradient without the model losing its ability to predict background.
+    Converts one-hot targets (B, C, H, W) -> class-index maps (B, H, W).
+    """
+    __name__ = 'Focal_loss'
+
+    def __init__(self):
+        super().__init__()
+        self._focal = smp.losses.FocalLoss(mode='multiclass')
+
+    def forward(self, y_pred, y_true):
+        y_true_idx = y_true.argmax(dim=1).long()
+        return self._focal(y_pred, y_true_idx)
+
+
+class IoUForegroundOnly(torch.nn.Module):
+    """IoU over foreground channels only (excludes channel 0 = background).
+    Keeps the reported metric comparable to IoUIgnoreBackground while the model
+    is trained on all classes including background.
+    """
+    __name__ = 'iou_score'
+
+    def __init__(self, threshold=0.5):
+        super().__init__()
+        self._iou = smp_metrics.IoU(threshold=threshold)
+
+    def forward(self, y_pred, y_true):
+        return self._iou(y_pred[:, 1:], y_true[:, 1:])
+
+
+class IoUBackgroundOnly(torch.nn.Module):
+    """IoU over the background channel only (channel 0). Reported alongside
+    the foreground IoU so the model's background-vs-foreground behavior is
+    visible without contaminating the main model-selection metric.
+    """
+    __name__ = 'iou_background'
+
+    def __init__(self, threshold=0.5):
+        super().__init__()
+        self._iou = smp_metrics.IoU(threshold=threshold)
+
+    def forward(self, y_pred, y_true):
+        return self._iou(y_pred[:, :1], y_true[:, :1])
 
 
 class Trainer():
@@ -53,7 +149,14 @@ class Trainer():
                  save_val_uncertainty=False,
                  config_file="None",
                  cross_val_exp_series="none",
-                 memory_optimized=False):
+                 memory_optimized=False,
+                 batch_size=1,
+                 accumulation_steps=4,
+                 data_leakage=False,
+                 ignore_background=False,
+                 use_weighted_sampler=False,
+                 num_workers=4
+                 ):
 
         self.size = size
         self.pred = pred
@@ -61,7 +164,8 @@ class Trainer():
         self.dataset = None
         self.research_site = None
         self.save_val_uncertainty = save_val_uncertainty
-        self.ignore_background = True
+        self.ignore_background = ignore_background
+        self.use_weighted_sampler = use_weighted_sampler
         self.config_file = config_file
         self.device = device
         self.epochs = epochs
@@ -71,26 +175,28 @@ class Trainer():
         self.n_folds = n_folds
         self.cross_val_exp_series = cross_val_exp_series
         self.memory_optimized = memory_optimized
-        
-        if self.memory_optimized:
-            self.num_workers = 0
-        else:
-            self.num_workers = 1
+        self.accumulation_steps = accumulation_steps
+        self.data_leakage = data_leakage
+        self.num_workers = 0 if self.memory_optimized else num_workers
 
         
         if load_config:
             self.ontology_file_name = None
             self.load_config()
             self.load_ontology()
-            self.class_values = [d["value"] for d in self.ontology["ontology"].values()]
-            self.labels = list(self.ontology["ontology"].keys())
+            if self.ignore_background:
+                self.class_values = [d["value"] for d in self.ontology["ontology"].values() if d["value"] != 0]
+                self.labels = list(self.ontology["ontology"].keys())[1:]
+            else:
+                self.class_values = [d["value"] for d in self.ontology["ontology"].values()]
+                self.labels = list(self.ontology["ontology"].keys())
 
         # model settings
         self.encoder = encoder
         self.encoder_weights = encoder_weights
         self.activation = 'softmax2d'
         self.optimizer_name = optimizer_name
-        self.batch_size = 1
+        self.batch_size = batch_size
         self.lr = 1e-4
         self.uncertainy_runs = 10
         self.weight_decay = 1e-4
@@ -99,6 +205,51 @@ class Trainer():
         self.preprocessing_fn = smp.encoders.get_preprocessing_fn(self.encoder, self.encoder_weights)
         self.preprocessing = get_preprocessing(self.preprocessing_fn)
 
+        self.check_gpu()
+
+
+
+    def check_gpu(self):
+        # --- GPU/CUDA Diagnostics ---
+        print("=== CUDA Diagnostics ===")
+        print(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'NOT SET')}")
+        print(f"torch.cuda.is_available(): {torch.cuda.is_available()}")
+        print(f"torch.version.cuda: {torch.version.cuda}")
+        print(f"torch.backends.cudnn.enabled: {torch.backends.cudnn.enabled}")
+
+        # Check what GPUs are physically visible
+        try:
+            result = subprocess.run(['nvidia-smi', '--query-gpu=index,name,memory.total',
+                                    '--format=csv,noheader'], capture_output=True, text=True)
+            print(f"nvidia-smi output:\n{result.stdout.strip()}")
+            print(f"nvidia-smi stderr: {result.stderr.strip()}")
+        except FileNotFoundError:
+            print("nvidia-smi not found!")
+
+        print("=" * 40)
+
+
+        import pynvml
+
+        pynvml.nvmlInit()
+        count = pynvml.nvmlDeviceGetCount()
+        print(f"pynvml sees {count} GPUs")
+        for i in range(count):
+            try:
+                h = pynvml.nvmlDeviceGetHandleByIndex(i)
+                print(f"  GPU {i}: {pynvml.nvmlDeviceGetName(h)}")
+            except Exception as e:
+                print(f"  GPU {i}: ERROR — {e}")
+
+        # GPU Memory Debug
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            print("\n=== GPU Memory Before Loading Model ===")
+            print(f"Allocated: {torch.cuda.memory_allocated(0)/1024**3:.2f} GB")
+            print(f"Reserved: {torch.cuda.memory_reserved(0)/1024**3:.2f} GB")
+            print("=" * 40 + "\n")
+
+        
 
     def load_ontology(self):
         """set ontologies, should be moved to separate file!!!
@@ -203,6 +354,43 @@ class Trainer():
             return result.stdout.strip()[:7]  # Short hash
         except subprocess.CalledProcessError:
             return "unknown"
+        
+
+    def setup_pred_logging(self):
+           # Get git commit hash
+        git_hash = self.get_git_commit_hash()
+
+        wandb.init(
+            project=self.wandb_project,
+            settings=wandb.Settings(
+                    _cuda_device_ids=[0]  # index 0 within CUDA_VISIBLE_DEVICES, i.e. your actual GPU
+                ),
+            name=self.exp_dir.stem,
+            job_type='ml-prediction',
+            config={
+                
+                # Model architecture
+                "model": "Unet",
+                "encoder": self.encoder,
+                "encoder_weights": "imagenet",
+                "classes": len(self.class_values),
+                
+                
+                # Random seeds
+                "seed": self.seed,
+                "torch_seed": self.seed,
+                "numpy_seed": self.seed,
+                
+                # Environment
+                "git_commit": git_hash,
+                "cuda_version": torch.version.cuda,
+                "gpu_type": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU",
+                "num_workers": self.num_workers
+            }
+        )
+
+        # Save pip freeze snapshot
+        wandb.save("requirements.txt")  # if you generate it before training
 
     def setup_logging(self):
         """setup logging for training and validation
@@ -215,6 +403,11 @@ class Trainer():
             name=self.exp_dir.stem,
             job_type='ml-optimizition',
             config={
+                # Train and Val images
+                "len_unique_train_images" : self.len_unique_train_imgs,
+                "len_unique_val_images" : self.len_unique_val_imgs,
+                "unique_train_images" : self.unique_train_imgs,
+                "unique_val_images" : self.unique_val_imgs,
                 # Hyperparameters
                 "learning_rate": self.lr,
                 "batch_size": self.batch_size,
@@ -223,6 +416,7 @@ class Trainer():
                 "activation": self.activation,
                 "weight_decay": self.weight_decay,
                 "scheduler": self.lr_scheduler,
+                "accumulation_steps": self.accumulation_steps,
                 
                 # Model architecture
                 "model": "Unet",
@@ -249,8 +443,7 @@ class Trainer():
                 # Environment
                 "git_commit": git_hash,
                 "cuda_version": torch.version.cuda,
-                # "gpu_type": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU",
-                # "num_workers": 4,
+                "gpu_type": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU",
             }
         )
 
@@ -281,6 +474,12 @@ class Trainer():
 
         self.x_test = self.x_valid
         self.y_test = self.y_valid
+
+        self.len_unique_train_imgs = 0
+        self.len_unique_val_imgs = 0
+
+        self.unique_train_imgs = []
+        self.unique_val_imgs = []
 
 
     def split_train_val(self, shuffled_original):
@@ -315,7 +514,21 @@ class Trainer():
 
         return unique_train_imgs, unique_val_imgs
 
+    def get_mixed_snow_train_val_imgs(self, sorted_unique_imgs):
 
+        snow_imgs = [x for x in sorted_unique_imgs if "september" in x]
+        non_snow_imgs = [x for x in sorted_unique_imgs if "september" not in x]
+
+        np.random.shuffle(snow_imgs)
+        np.random.shuffle(non_snow_imgs)
+
+        non_snow_shuffled_unique_train_imgs, non_snow_shuffled_unique_val_imgs = self.split_train_val(non_snow_imgs)
+        snow_shuffled_unique_train_imgs, snow_shuffled_unique_val_imgs = self.split_train_val(snow_imgs)
+
+        unique_train_imgs = non_snow_shuffled_unique_train_imgs + snow_shuffled_unique_train_imgs
+        unique_val_imgs = non_snow_shuffled_unique_val_imgs + snow_shuffled_unique_val_imgs
+
+        return unique_train_imgs, unique_val_imgs
 
     def get_train_val_imgs(self, sorted_unique_imgs, train_split):
         
@@ -337,11 +550,15 @@ class Trainer():
         if self.research_site == "mixed":
             unique_train_imgs, unique_val_imgs = self.get_mixed_train_val_imgs(sorted_unique_imgs, train_split)
         
+        
         else:
             unique_train_imgs, unique_val_imgs = self.get_train_val_imgs(sorted_unique_imgs, train_split)
 
         self.unique_train_imgs = unique_train_imgs
         self.unique_val_imgs = unique_val_imgs
+
+        self.len_unique_train_imgs = len(unique_train_imgs)
+        self.len_unique_val_imgs = len(unique_val_imgs)
 
         self.x_train = [os.path.join(self.img_dir, x) for x in self.ids if x.split("_part")[0] in unique_train_imgs]
 
@@ -383,6 +600,8 @@ class Trainer():
             self.exp_dir = exp_dir
             os.makedirs(self.exp_dir)
 
+            self.model_save_path = os.path.join(self.exp_dir, 'best_model.pth')
+
         if test:
             self.exp_dirs = [x for x in os.listdir(Path(self.yaml_file["exp_dir"])) if encoder in x]
             self.sorted_exp_dirs = sorted(self.exp_dirs, key=lambda x: int(x.split("_")[-1]))
@@ -390,6 +609,8 @@ class Trainer():
             print(self.exp_dir)
         if pred:
             self.exp_dir = Path(os.path.join(self.yaml_file["exp_dir"], "exp_{0}_{1}".format(self.encoder, self.seed)))
+            self.model_save_path = self.best_model_path
+            print("Best model path: ", self.best_model_path)
             print("Predicting images from: ", self.test_dir)
 
         pdf_path = os.path.join(self.exp_dir, "results.pdf")
@@ -400,9 +621,11 @@ class Trainer():
             
         self.pdf_path = pdf_path
 
-        # set model save path
-        self.model_save_path = os.path.join(self.exp_dir, 'best_model.pth')
+
+        random.seed(self.seed)
         np.random.seed(self.seed)
+        torch.manual_seed(self.seed)
+        torch.cuda.manual_seed(self.seed)
 
         self.ids = sorted(os.listdir(self.img_dir))
 
@@ -416,7 +639,7 @@ class Trainer():
 
         num_unique = 10 # 10 for training; 1000 just for data leakage test
 
-        if len(sorted_unique_imgs) < num_unique:
+        if len(sorted_unique_imgs) < num_unique or self.data_leakage:
             print("Only {0} image found! Using non-unique images. Data leakage might be a problem...".format(len(sorted_unique_imgs)))
             self.set_non_unique_paths(self.train_split)
 
@@ -432,12 +655,32 @@ class Trainer():
         print("\n=== Class Distribution Analysis ===")
         train_class_counts = np.zeros(len(self.class_values))
         val_class_counts = np.zeros(len(self.class_values))
-        
-        # Count training set
+        train_patch_counts = []
+
+        # First pass: count pixels per class globally and per tile
         for mask_path in self.y_train:
             mask = cv2.imread(mask_path, cv2.IMREAD_UNCHANGED)
+            patch_counts = np.zeros(len(self.class_values))
             for idx, class_val in enumerate(self.class_values):
-                train_class_counts[idx] += np.sum(mask == class_val)
+                count = np.sum(mask == class_val)
+                train_class_counts[idx] += count
+                patch_counts[idx] = count
+            train_patch_counts.append(patch_counts)
+
+        self.train_patch_counts = np.array(train_patch_counts)  # (N_tiles, N_classes)
+
+        # Per-tile sampling weight = expected inverse-global-frequency over the
+        # tile's pixels. Tiles containing globally rare classes are boosted;
+        # tiles dominated by globally common classes are damped. Unlike the
+        # prior local-rarity formula, a tile that is 100% of a globally rare
+        # class is correctly oversampled.
+        global_inv_freq = 1.0 / np.maximum(train_class_counts, 1.0)
+        tile_totals = self.train_patch_counts.sum(axis=1)
+        safe_totals = np.where(tile_totals > 0, tile_totals, 1)
+        tile_fractions = self.train_patch_counts / safe_totals[:, None]
+        tile_weights = tile_fractions @ global_inv_freq
+        tile_weights = np.where(tile_totals > 0, tile_weights, 0.0)
+        self.sample_weights = tile_weights.tolist()
         
         # Count validation set
         for mask_path in self.y_valid:
@@ -489,8 +732,32 @@ class Trainer():
             preprocessing=get_preprocessing(self.preprocessing_fn),
         )
 
-        self.train_loader = DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers)
-        self.valid_loader = DataLoader(self.valid_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
+        loader_kwargs = dict(pin_memory=True, prefetch_factor=4, persistent_workers=True) if self.num_workers > 0 else {}
+
+        if self.use_weighted_sampler:
+            sampler = RecordingWeightedSampler(
+                weights=self.sample_weights,
+                num_samples=len(self.sample_weights),
+                replacement=True,
+            )
+        else:
+            sampler = None
+
+        self.sampler = sampler
+        
+        self.train_loader = DataLoader(self.train_dataset,
+                                        batch_size=self.batch_size,
+                                        sampler=sampler,
+                                        num_workers=self.num_workers,
+                                        **loader_kwargs,
+                                       )
+
+        self.valid_loader = DataLoader(self.valid_dataset,
+                                       batch_size=self.batch_size,
+                                       shuffle=False,
+                                       num_workers=self.num_workers,
+                                       **loader_kwargs,
+                                       )
 
 
     def update_dataloaders(self, x_train):
@@ -562,19 +829,12 @@ class Trainer():
 
         
         if self.ignore_background:
-            ignore_index = [0]
-            ignore_channels = [0]
+            self.focal_loss = FocalLossIgnoreBackground()
+            self.metrics = [IoUIgnoreBackground(threshold=0.5)]
         else:
-            ignore_index = None
-            ignore_channels = None
-
-        self.focal_loss = smp.losses.FocalLoss(mode='multilabel', ignore_index=ignore_index)
-        self.focal_loss.__name__ = 'Focal_loss'
+            self.focal_loss = MultiClassFocalLoss()
+            self.metrics = [IoUForegroundOnly(threshold=0.5), IoUBackgroundOnly(threshold=0.5)]
         self.loss = self.focal_loss
-
-        self.metrics = [
-            smp_metrics.IoU(threshold=0.5, ignore_channels=ignore_channels),
-        ]
 
 
         if self.optimizer_name == "Adam":
@@ -618,7 +878,10 @@ class Trainer():
             verbose=True,
         )
 
-        self.setup_logging()
+        if self.pred:
+            self.setup_pred_logging()
+        else:
+            self.setup_logging()
 
 
     def save_model(self, epoch, update_latest=False):
@@ -643,10 +906,6 @@ class Trainer():
         
         print("Model updated!")
 
-    def dry_run_loop(self):
-        for epoch in range(0, self.epochs):
-            self.train_log_df.loc[epoch] = ["dry_run", 0]
-            self.valid_log_df.loc[epoch] = ["dry_run", 0]
 
     def get_per_image_ious(self):
             # Track per-image performance
@@ -664,12 +923,16 @@ class Trainer():
             return image_ious
             
 
-    def run_train_loop(self, al_step=25):
+    def run_train_loop(self):
         max_score = 0
         self.image_iou_df = pd.DataFrame({'image': [Path(x).stem for x in self.x_valid]})
         self.image_iou_csv_path = os.path.join(self.exp_dir, "per_image_iou_tracking.csv")
 
         for epoch in range(0, self.epochs):
+
+            print("cuda available: ", torch.cuda.is_available())
+            print(f"[GPU] Allocated: {torch.cuda.memory_allocated(0)/1024**3:.2f} GB | "
+            f"Reserved: {torch.cuda.memory_reserved(0)/1024**3:.2f} GB")
             
             print('\n Seed {0} | Epoch: {1}/{2}'.format(self.seed, epoch, self.epochs))
             self.train_logs = self.train_epoch.run(self.train_loader)
@@ -681,22 +944,14 @@ class Trainer():
             if max_score < self.valid_logs['iou_score']:
                 print('New top score: {0} > {1} '.format(self.valid_logs['iou_score'], max_score))
                 max_score = self.valid_logs['iou_score']
-
-                # epoch_ious = {name: iou for name, iou in image_ious}
-                # self.image_iou_df[f'epoch_{epoch}'] = self.image_iou_df['image'].map(epoch_ious)
-                # self.image_iou_df.to_csv(self.image_iou_csv_path, index=False)
-
-                # wandb.log({
-                #     "val/per_image_ious": wandb.Table(dataframe=self.image_iou_df),
-                # })
-
-                # torch.save(self.model, self.model_save_path)
+        
                 self.save_model(epoch=epoch)
                 self.save_loss_plots()
-                self.save_confusion_matrix(epoch=epoch)
 
                 if self.save_val_uncertainty:
                     self.save_uncertainty_images(epoch)
+
+            self.save_confusion_matrix(epoch=epoch)
 
             self.train_log_df.loc[epoch] = [self.train_logs[self.loss.__name__], self.train_logs['iou_score']]
             self.valid_log_df.loc[epoch] = [self.valid_logs[self.loss.__name__], self.valid_logs['iou_score']]
@@ -713,7 +968,7 @@ class Trainer():
             #     index=False
             #     )
 
-            wandb.log({
+            wandb_log = {
                 "epoch": epoch,
                 "train/loss": self.train_logs[self.loss.__name__],
                 "train/iou": self.train_logs["iou_score"],
@@ -726,84 +981,132 @@ class Trainer():
                 # "val/iou_std": np.std(iou_values),
                 # "val/worst_image": f"{image_ious_sorted[0][0]}: {image_ious_sorted[0][1]:.3f}",
                 # "val/best_image": f"{image_ious_sorted[-1][0]}: {image_ious_sorted[-1][1]:.3f}",
-            })
+            }
+            if 'iou_background' in self.valid_logs:
+                wandb_log["train/iou_background"] = self.train_logs['iou_background']
+                wandb_log["val/iou_background"] = self.valid_logs['iou_background']
+            wandb.log(wandb_log)
 
             self.scheduler.step(self.valid_logs['iou_score'])
 
 
 
-    def run_optimized_train_loop(self, al_step=25):
+    def run_train_loop_with_accumulation(self, early_stopping_patience=0):
+        """Run training loop with gradient accumulation.
+
+        Args:
+            early_stopping_patience (int): stop if val IoU does not improve for this many
+                epochs. 0 (default) disables early stopping.
+        """
         max_score = 0
-        scaler = torch.cuda.amp.GradScaler()
+        epochs_without_improvement = 0
 
-        print(f"Model parameters: {sum(p.numel() for p in self.model.parameters()) / 1e6:.1f}M")
-        # x_test = torch.randn(1, 3, 1024, 1024).to(self.device)
-        # with torch.cuda.amp.autocast():
-        #     _ = self.model(x_test)
-        # print(f"After forward: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
-        # del x_test
-        # torch.cuda.empty_cache()
-
+        print("device: ", self.device)
         for epoch in range(self.epochs):
             print(f'\n Seed {self.seed} | Epoch: {epoch}/{self.epochs}')
-            
+
             # === TRAINING ===
             self.model.train()
             train_loss_sum = 0
-            train_iou_sum = 0
-            
-            for x, y in tqdm(self.train_loader, desc='train'):
+            train_metric_sums = {m.__name__: 0.0 for m in self.metrics}
+            self.optimizer.zero_grad()
+            pbar = tqdm(self.train_loader, desc='train')
+
+            print("cuda available: ", torch.cuda.is_available())
+            print(f"[GPU] Allocated: {torch.cuda.memory_allocated(0)/1024**3:.2f} GB | "
+            f"Reserved: {torch.cuda.memory_reserved(0)/1024**3:.2f} GB")
+
+            for batch_idx, (x, y) in enumerate(pbar):
                 x, y = x.to(self.device), y.to(self.device)
-                self.optimizer.zero_grad()
-                
-                with torch.cuda.amp.autocast():
-                    pred = self.model(x)
-                    loss = self.loss(pred, y)
-                
-                scaler.scale(loss).backward()
-                scaler.step(self.optimizer)
-                scaler.update()
-                
+
+                pred = self.model(x)
+                loss = self.loss(pred, y)
+                (loss / self.accumulation_steps).backward()
+
                 train_loss_sum += loss.item()
-                train_iou_sum += self.metrics[0](pred, y).item()
-            
+                with torch.no_grad():
+                    for m in self.metrics:
+                        train_metric_sums[m.__name__] += m(pred.detach(), y).item()
+                postfix = {'loss': train_loss_sum/(batch_idx+1)}
+                for name, total in train_metric_sums.items():
+                    postfix[name] = total / (batch_idx + 1)
+                postfix['gpu_mem'] = f"{torch.cuda.memory_allocated(0)/1024**3:.2f} GB"
+                pbar.set_postfix(**postfix)
+
+                if (batch_idx + 1) % self.accumulation_steps == 0 or (batch_idx + 1) == len(self.train_loader):
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    self.optimizer.step()
+                    self.optimizer.zero_grad()
+
             # === VALIDATION ===
             self.model.eval()
             val_loss_sum = 0
-            val_iou_sum = 0
-            
+            val_metric_sums = {m.__name__: 0.0 for m in self.metrics}
+
             with torch.no_grad():
                 for x, y in tqdm(self.valid_loader, desc='valid'):
                     x, y = x.to(self.device), y.to(self.device)
-                    with torch.cuda.amp.autocast():
-                        pred = self.model(x)
-                        loss = self.loss(pred, y)
+                    pred = self.model(x)
+                    loss = self.loss(pred, y)
                     val_loss_sum += loss.item()
-                    val_iou_sum += self.metrics[0](pred, y).item()
-            
+                    for m in self.metrics:
+                        val_metric_sums[m.__name__] += m(pred, y).item()
+
             # === LOGGING ===
             self.train_logs = {
                 self.loss.__name__: train_loss_sum / len(self.train_loader),
-                'iou_score': train_iou_sum / len(self.train_loader)
+                **{name: total / len(self.train_loader) for name, total in train_metric_sums.items()}
             }
             self.valid_logs = {
                 self.loss.__name__: val_loss_sum / len(self.valid_loader),
-                'iou_score': val_iou_sum / len(self.valid_loader)
+                **{name: total / len(self.valid_loader) for name, total in val_metric_sums.items()}
             }
-            
+
             if max_score < self.valid_logs['iou_score']:
                 print(f'New top score: {self.valid_logs["iou_score"]:.4f} > {max_score:.4f}')
                 max_score = self.valid_logs['iou_score']
+                epochs_without_improvement = 0
                 self.save_model(epoch=epoch)
                 self.save_loss_plots()
-                self.save_confusion_matrix(epoch=epoch)
                 if self.save_val_uncertainty:
                     self.save_uncertainty_images(epoch)
+            else:
+                epochs_without_improvement += 1
 
+            self.save_confusion_matrix(epoch=epoch)
             self.train_log_df.loc[epoch] = [self.train_logs[self.loss.__name__], self.train_logs['iou_score']]
             self.valid_log_df.loc[epoch] = [self.valid_logs[self.loss.__name__], self.valid_logs['iou_score']]
+            self.train_log_df.to_csv(os.path.join(self.exp_dir, "train_log.csv"))
+            self.valid_log_df.to_csv(os.path.join(self.exp_dir, "valid_log.csv"))
 
-    def train_model(self, al_step=25, dry_run=False):
+            self.scheduler.step(self.valid_logs['iou_score'])
+
+            sampled_counts = self.train_patch_counts[self.sampler.last_indices].sum(axis=0)
+            sampled_total = sampled_counts.sum()
+            sampled_dist = {
+                f"sampled_dist/{label}": sampled_counts[i] / sampled_total if sampled_total > 0 else 0
+                for i, label in enumerate(self.labels)
+            }
+
+            wandb_log = {
+                "epoch": epoch,
+                "train/loss": self.train_logs[self.loss.__name__],
+                "train/iou": self.train_logs["iou_score"],
+                "val/loss": self.valid_logs[self.loss.__name__],
+                "val/iou": self.valid_logs["iou_score"],
+                "learning_rate": self.optimizer.param_groups[0]['lr'],
+                **sampled_dist,
+            }
+            if 'iou_background' in self.valid_logs:
+                wandb_log["train/iou_background"] = self.train_logs['iou_background']
+                wandb_log["val/iou_background"] = self.valid_logs['iou_background']
+            wandb.log(wandb_log)
+
+            if early_stopping_patience > 0 and epochs_without_improvement >= early_stopping_patience:
+                print(f'Early stopping: no improvement for {early_stopping_patience} epochs.')
+                break
+
+    def train_model(self, al_step=25, early_stopping_patience=0):
 
         torch.cuda.empty_cache()
 
@@ -816,15 +1119,15 @@ class Trainer():
         self.valid_log_df = pd.DataFrame(columns=[self.loss.__name__, 'iou_score'])
 
 
-        if not dry_run:
-            if self.memory_optimized:
-                self.run_optimized_train_loop(al_step=al_step)
+        if self.memory_optimized:
+            self.run_optimized_train_loop(al_step=al_step)
+        else:
+            if self.accumulation_steps == 0:
+                self.run_train_loop()
             else:
-                self.run_train_loop(al_step=al_step)
-            self.save_loss_plots()
-        elif dry_run:
-            print("Dry run for testing...")
-            self.dry_run_loop()
+                self.run_train_loop_with_accumulation(early_stopping_patience=early_stopping_patience)
+        self.save_loss_plots()
+
 
 
 
@@ -834,23 +1137,43 @@ class Trainer():
 
     def save_confusion_matrix(self, epoch):
         cf_matrix = np.zeros((len(self.class_values), len(self.class_values)))
+        # Map raw pixel values to matrix indices (e.g. class value 9 → index 8 when background excluded)
+        val_to_idx = {v: i for i, v in enumerate(self.class_values)}
 
         for n in range(len(self.valid_dataset)):
-            # n = np.random.choice(len(valid_dataset))
-            # image_vis = valid_dataset[n][0].astype('uint8')
             image, gt_mask = self.valid_dataset[n]
             pred = self.calculate_prediction(image)
-            gt_mask_2d, unique_values = self.get_2d_image(gt_mask)
+            gt_mask_2d, _ = self.get_2d_image(gt_mask)
 
             y_pred_flattened = pred.flatten()
             y_true_flattened = gt_mask_2d.flatten()
 
-            cf_m = confusion_matrix(y_true_flattened, y_pred_flattened)
-            for i in range(len(unique_values)):
-                u = unique_values[i]
-                for j in range(len(unique_values)):
-                    k = unique_values[j]
-                    cf_matrix[u][k] += cf_m[i][j]
+            # Use only foreground labels present in y_true for this image.
+            # Background-only patches (no class_values in y_true) are skipped.
+            # y_pred values outside these labels are ignored by sklearn (treated as misses).
+            true_labels = sorted(
+                {v for v in np.unique(y_true_flattened) if v in val_to_idx}
+            )
+            present_labels = sorted(
+                {v for v in np.unique(np.concatenate([y_true_flattened, y_pred_flattened]))
+                 if v in val_to_idx}
+            )
+            if not true_labels:
+                continue
+
+            # DEBUG
+            # print(f"[CFM DEBUG] image {n}")
+            # print(f"  y_true unique: {np.unique(y_true_flattened)}")
+            # print(f"  y_pred unique: {np.unique(y_pred_flattened)}")
+            # print(f"  true_labels: {true_labels}")
+            # print(f"  present_labels (true+pred): {present_labels}")
+            # print(f"  class_values: {self.class_values}")
+            # print(f"  val_to_idx: {val_to_idx}")
+
+            cf_m = confusion_matrix(y_true_flattened, y_pred_flattened, labels=true_labels)
+            for i, u_val in enumerate(true_labels):
+                for j, k_val in enumerate(true_labels):
+                    cf_matrix[val_to_idx[u_val]][val_to_idx[k_val]] += cf_m[i][j]
 
 
         cf_matrix_normed = normalize(cf_matrix, axis=1, norm='l1')
@@ -863,6 +1186,12 @@ class Trainer():
 
         cfm_df = pd.DataFrame(columns=[self.labels], index=self.labels, data=cf_matrix_normed)
         cfm_df.to_csv(os.path.join(self.exp_dir, "confusion_matrix_ep{0}.csv".format(epoch)))
+
+        # Raw (unnormalized) matrix preserves row/column totals so per-class IoU
+        # (including background) can be recomputed offline: IoU_c = CM[c,c] /
+        # (sum(CM[c,:]) + sum(CM[:,c]) - CM[c,c])
+        cfm_raw_df = pd.DataFrame(columns=[self.labels], index=self.labels, data=cf_matrix)
+        cfm_raw_df.to_csv(os.path.join(self.exp_dir, "confusion_matrix_raw_ep{0}.csv".format(epoch)))
 
 
 
@@ -903,8 +1232,11 @@ class Trainer():
         mask = mask.transpose(1, 2, 0)
         out = np.zeros((mask.shape[0], mask.shape[1]), dtype=np.int64)
 
-        for v in self.class_values:
-            out[mask[:,:,v] == 1] = v
+        # for v in self.class_values:
+            # out[mask[:,:,v] == 1] = v
+
+        for channel_idx, class_val in enumerate(self.class_values): # consider removed background
+            out[mask[:, :, channel_idx] == 1] = class_val
         mask = out
         unique_values = np.unique(mask)
 
@@ -946,7 +1278,12 @@ class Trainer():
 
                 plt.imshow(image, cmap=col, interpolation='nearest', norm=norm)
                 # plot only unique class values in legend
-                patches = [ mpatches.Patch(color=colors_hex[i], label=self.labels[i] ) for i in unique_values]
+                if self.ignore_background:
+                    # labels has no background entry, so pixel value i maps to labels[i-1]; skip background pixels (i=0)
+                    patches = [mpatches.Patch(color=colors_hex[i], label=self.labels[i - 1]) for i in unique_values if i > 0]
+                else:
+                    # labels includes background at index 0, so pixel value i maps directly to labels[i]
+                    patches = [mpatches.Patch(color=colors_hex[i], label=self.labels[i]) for i in unique_values]
 
                 plt.axis('off')
                 plt.legend(handles=patches, bbox_to_anchor=(1.05, 1), loc=0, borderaxespad=0. )   
@@ -1192,8 +1529,11 @@ class Trainer():
         pr_mask = pr_mask.transpose(1, 2, 0)
         out = np.zeros((pr_mask.shape[0], pr_mask.shape[1]), dtype=np.int64)
 
-        for v in self.class_values:
-            out[pr_mask[:,:,v] == 1] = v
+        # for v in self.class_values:
+            # out[pr_mask[:,:,v] == 1] = v
+        
+        for channel_idx, class_val in enumerate(self.class_values):
+            out[pr_mask[:, :, channel_idx] == 1] = class_val
 
         if return_entropy:
             return out, class_entropies
@@ -1316,14 +1656,6 @@ class Trainer():
         """
 
         # self.set_pdf_path_pred()
-        
-        # GPU Memory Debug
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            print("\n=== GPU Memory Before Loading Model ===")
-            print(f"Allocated: {torch.cuda.memory_allocated(0)/1024**3:.2f} GB")
-            print(f"Reserved: {torch.cuda.memory_reserved(0)/1024**3:.2f} GB")
-            print("=" * 40 + "\n")
 
         self.load_model()
 
@@ -1349,7 +1681,21 @@ class Trainer():
                 print("FILE: ", img_paths[n])
                 print("continue...")
                 continue
-            
+
+def check_gpu_availability():
+    if torch.cuda.is_available():
+        try:
+            # Force actual initialization of the assigned device
+            torch.cuda.set_device(0)  # device 0 within CUDA_VISIBLE_DEVICES, i.e. GPU 3
+            _ = torch.zeros(1).cuda()
+            print(f"GPU successfully initialized: {torch.cuda.get_device_name(0)}")
+        except Exception as e:
+            print(f"FATAL: GPU init failed despite cuda.is_available() — {e}")
+            print("Assigned GPU problems?. Exiting to avoid silent CPU run.")
+            sys.exit(1)
+    else:
+        print("FATAL: No CUDA available.")
+        sys.exit(1)
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train or test segmentation model')
@@ -1359,6 +1705,13 @@ def parse_args():
     parser.add_argument('--cross_val_run', default=0, type=int, help='cross validation run index (0...n)', required=False)
     parser.add_argument('--epochs', default=600, type=int, help='number of training epochs', required=False)
     parser.add_argument('--memory_optimized', action='store_true', help='enable memory optimized training with gradient checkpointing and 8-bit optimizer', required=False)
+    parser.add_argument('--accumulation_steps', default=4, type=int, help='number of accumulation steps for gradient accumulation (effective batch = batch_size * accumulation_steps)', required=False)
+    parser.add_argument('--data_leakage', action='store_true', help='allow data leakage in cross validation (subimages from one original image might be placed in training and validation set)', required=False)
+    parser.add_argument('--batch_size', default=2, type=int, help='batch size for training', required=False)
+    parser.add_argument('--early_stopping_patience', default=0, type=int, help='stop training if val IoU does not improve for this many epochs; 0 disables early stopping', required=False)
+    parser.add_argument('--num_workers', default=16, type=int, help='number of DataLoader worker processes for data loading; increase to reduce GPU idle time', required=False)
+    parser.add_argument('--ignore_background', default=False, action=argparse.BooleanOptionalAction, help='exclude background class from training and mask it out of the loss/metric (default: False; the default path trains background as an explicit class and relies on focal loss to down-weight it)')
+    parser.add_argument('--use_weighted_sampler', action='store_true', help='use weighted sampler to address class imbalance in training data', required=False)
     args = parser.parse_args()
     return args
 
@@ -1367,6 +1720,8 @@ if __name__ == "__main__":
 
     # encoder_list = ['mit_b0', 'efficientnet-b3', 'efficientnet-b7', 'vgg16', 'resnet50']
     # encoder_list = ['mit_b1', 'mit_b3', 'mit_b5']
+
+    check_gpu_availability()
 
     seed = 10
     n_folds = 5
@@ -1383,6 +1738,17 @@ if __name__ == "__main__":
     cross_val_exp_series = str(uuid.uuid4())[:6]
     memory_optimized = args.memory_optimized
     epochs = args.epochs
+    accumulation_steps = args.accumulation_steps
+    data_leakage = args.data_leakage
+    batch_size = args.batch_size
+    ignore_background = args.ignore_background
+    use_weighted_sampler = args.use_weighted_sampler
+    early_stopping_patience = args.early_stopping_patience
+    num_workers = args.num_workers
+
+    if data_leakage:
+        print(" CAUTION: \n Data leakage is allowed in cross validation! \n Subimages from one original image might be placed in training and validation set.")
+        print("Overfitting might occur and results might be overestimated! \n CAUTION! \n")
 
     print(encoder_list)
 
@@ -1397,7 +1763,14 @@ if __name__ == "__main__":
                           config_file=config_file,
                           n_folds=n_folds,
                           cross_val_exp_series=cross_val_exp_series,
-                          memory_optimized=memory_optimized) # create Trainer object, load config & set default values
+                          memory_optimized=memory_optimized,
+                          batch_size=batch_size,
+                          accumulation_steps=accumulation_steps,
+                          data_leakage=data_leakage,
+                          ignore_background=ignore_background,
+                          use_weighted_sampler=use_weighted_sampler,
+                          num_workers=num_workers
+                          )
         for encoder in encoder_list:
             trainer.set_encoder(encoder) # set encoder for model
             # for cross_val_run in range(1, n_folds+1):
@@ -1408,14 +1781,14 @@ if __name__ == "__main__":
             
             trainer.create_dataloaders(augmentations=True) # create dataloaders from image and mask paths
             trainer.prepare_model() # create Unet object and loss & metric objects and Training/Validation Epoch Runners
-            trainer.train_model() # start training routine using Training/Validation Epoch Runners
+            trainer.train_model(early_stopping_patience=early_stopping_patience) # start training routine using Training/Validation Epoch Runners
             # trainer.test_model()
     
     elif args.mode == 'test':
         # for encoder in encoder_list:
         encoder = 'mit_b5'
         print("Test: ", encoder, "\n")
-        trainer = Trainer(encoder=encoder, seed=seed, config_file=config_file) # create Trainer object and set default values
+        trainer = Trainer(encoder=encoder, seed=seed, config_file=config_file, ignore_background=ignore_background, num_workers=num_workers) # create Trainer object and set default values
         trainer.set_paths() # set paths for testing (not recently tested)
         trainer.test_model() # test model
 
@@ -1433,7 +1806,7 @@ if __name__ == "__main__":
 
 
         print("Predict: ", encoder, "\n")
-        trainer = Trainer(encoder=encoder, seed=seed, pred=True, config_file=config_file)
+        trainer = Trainer(encoder=encoder, seed=seed, pred=True, config_file=config_file, ignore_background=ignore_background, num_workers=num_workers)
         trainer.set_paths(pred=True)
         trainer.predict(save_entropies=True)
 
