@@ -7,7 +7,6 @@
         "cyanosmoss": {"value": 4, "color": "#2601d8"},
         "lichen": {"value": 5, "color": "#ff00c3"},
         "barkdominated": {"value": 6, "color": "#Ff0000"},
-        "cyanosbark": {"value": 7, "color": "#FFA500"},
-        "other": {"value": 8, "color": "#FFFF00"}
+        "cyanosbark": {"value": 7, "color": "#FFA500"}
     }
  }
