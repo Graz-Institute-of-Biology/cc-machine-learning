@@ -101,6 +101,28 @@ class MultiClassFocalLoss(torch.nn.Module):
         return self._focal(y_pred, y_true_idx)
 
 
+class DiceCEWeighted(torch.nn.Module):
+    """Compound Dice + class-weighted cross-entropy on logits.
+
+    Dice operates at the segment level so rare classes can't be ignored by
+    predicting them as background; class-weighted CE adds per-pixel calibration
+    with emphasis on rare classes (weights typically 1/sqrt(freq)).
+    Expects y_pred as logits; one-hot targets are argmax'd to class indices.
+    """
+    __name__ = 'DiceCE_loss'
+
+    def __init__(self, class_weights, dice_weight=0.5, ce_weight=0.5):
+        super().__init__()
+        self._dice = smp.losses.DiceLoss(mode='multiclass', from_logits=True)
+        self._ce = torch.nn.CrossEntropyLoss(weight=class_weights)
+        self.dice_w = dice_weight
+        self.ce_w = ce_weight
+
+    def forward(self, y_pred, y_true):
+        y_true_idx = y_true.argmax(dim=1).long()
+        return self.dice_w * self._dice(y_pred, y_true_idx) + self.ce_w * self._ce(y_pred, y_true_idx)
+
+
 class IoUForegroundOnly(torch.nn.Module):
     """IoU over foreground channels only (excludes channel 0 = background).
     Keeps the reported metric comparable to IoUIgnoreBackground while the model
@@ -163,7 +185,8 @@ class Trainer():
                  data_leakage=False,
                  ignore_background=False,
                  use_weighted_sampler=False,
-                 num_workers=4
+                 num_workers=4,
+                 loss_name='focal',
                  ):
 
         self.size = size
@@ -174,6 +197,7 @@ class Trainer():
         self.save_val_uncertainty = save_val_uncertainty
         self.ignore_background = ignore_background
         self.use_weighted_sampler = use_weighted_sampler
+        self.loss_name = loss_name
         self.config_file = config_file
         self.device = device
         self.epochs = epochs
@@ -681,13 +705,14 @@ class Trainer():
             train_patch_counts.append(patch_counts)
 
         self.train_patch_counts = np.array(train_patch_counts)  # (N_tiles, N_classes)
+        self.train_class_counts = train_class_counts  # used for loss class weights
 
-        # Per-tile sampling weight = expected inverse-global-frequency over the
-        # tile's pixels. Tiles containing globally rare classes are boosted;
-        # tiles dominated by globally common classes are damped. Unlike the
-        # prior local-rarity formula, a tile that is 100% of a globally rare
-        # class is correctly oversampled.
-        global_inv_freq = 1.0 / np.maximum(train_class_counts, 1.0)
+        # Per-tile sampling weight = expected inverse-sqrt-frequency over the
+        # tile's pixels. sqrt softens the ratio between rare and common classes
+        # (vs. raw 1/freq where cyanosbark@0.27% was ~370x background, now ~15x),
+        # reducing the risk of memorizing the few tiles containing the rarest
+        # classes while still oversampling them.
+        global_inv_freq = 1.0 / np.sqrt(np.maximum(train_class_counts, 1.0))
         tile_totals = self.train_patch_counts.sum(axis=1)
         safe_totals = np.where(tile_totals > 0, tile_totals, 1)
         tile_fractions = self.train_patch_counts / safe_totals[:, None]
@@ -842,12 +867,24 @@ class Trainer():
 
         
         if self.ignore_background:
-            self.focal_loss = FocalLossIgnoreBackground()
             self.metrics = [IoUIgnoreBackground(threshold=0.5)]
         else:
-            self.focal_loss = MultiClassFocalLoss()
             self.metrics = [IoUForegroundOnly(threshold=0.5), IoUBackgroundOnly(threshold=0.5)]
-        self.loss = self.focal_loss
+
+        if self.loss_name == 'focal':
+            self.loss = FocalLossIgnoreBackground() if self.ignore_background else MultiClassFocalLoss()
+        elif self.loss_name == 'dice_ce':
+            # Per-class weights: 1/sqrt(freq) normalized so mean weight = 1.
+            # Keeps the overall loss scale comparable to unweighted CE while
+            # boosting rare classes (cyanosbark ~7x background, vs. ~370x with raw 1/freq).
+            freq = self.train_class_counts / max(self.train_class_counts.sum(), 1.0)
+            w = 1.0 / np.sqrt(freq + 1e-8)
+            w = w / w.mean()
+            print(f"CE class weights: {dict(zip(self.labels, np.round(w, 3)))}")
+            class_weights_t = torch.tensor(w, dtype=torch.float32, device=self.device)
+            self.loss = DiceCEWeighted(class_weights=class_weights_t)
+        else:
+            raise ValueError(f"Unknown loss_name: {self.loss_name}")
 
 
         if self.optimizer_name == "Adam":
@@ -1055,6 +1092,14 @@ class Trainer():
             self.model.eval()
             val_loss_sum = 0
             val_metric_sums = {m.__name__: 0.0 for m in self.metrics}
+            # Corpus-wide per-class IoU: accumulate TP/FP/FN across the full
+            # val set and compute IoU once at the end (this is NOT the same as
+            # averaging per-batch per-class IoUs, which biases toward classes
+            # that happen to land in batches with lots of pixels).
+            C = len(self.class_values)
+            tp_sum = torch.zeros(C, device=self.device)
+            fp_sum = torch.zeros(C, device=self.device)
+            fn_sum = torch.zeros(C, device=self.device)
 
             with torch.no_grad():
                 for x, y in tqdm(self.valid_loader, desc='valid'):
@@ -1064,6 +1109,13 @@ class Trainer():
                     val_loss_sum += loss.item()
                     for m in self.metrics:
                         val_metric_sums[m.__name__] += m(pred, y).item()
+                    probs = torch.softmax(pred, dim=1)
+                    binary = (probs > 0.5).float()
+                    tp_sum += (binary * y).sum(dim=(0, 2, 3))
+                    fp_sum += (binary * (1 - y)).sum(dim=(0, 2, 3))
+                    fn_sum += ((1 - binary) * y).sum(dim=(0, 2, 3))
+
+            per_class_iou = (tp_sum / (tp_sum + fp_sum + fn_sum + 1e-7)).cpu().numpy()
 
             # === LOGGING ===
             self.train_logs = {
@@ -1101,6 +1153,14 @@ class Trainer():
                 for i, label in enumerate(self.labels)
             }
 
+            per_class_iou_log = {
+                f"val/iou_{label}": float(per_class_iou[i])
+                for i, label in enumerate(self.labels)
+            }
+            print("Per-class val IoU: " + ", ".join(
+                f"{label}={per_class_iou[i]:.3f}" for i, label in enumerate(self.labels)
+            ))
+
             wandb_log = {
                 "epoch": epoch,
                 "train/loss": self.train_logs[self.loss.__name__],
@@ -1109,6 +1169,7 @@ class Trainer():
                 "val/iou": self.valid_logs["iou_score"],
                 "learning_rate": self.optimizer.param_groups[0]['lr'],
                 **sampled_dist,
+                **per_class_iou_log,
             }
             if 'iou_background' in self.valid_logs:
                 wandb_log["train/iou_background"] = self.train_logs['iou_background']
@@ -1729,6 +1790,7 @@ def parse_args():
     parser.add_argument('--num_workers', default=16, type=int, help='number of DataLoader worker processes for data loading; increase to reduce GPU idle time', required=False)
     parser.add_argument('--ignore_background', default=False, action=argparse.BooleanOptionalAction, help='exclude background class from training and mask it out of the loss/metric (default: False; the default path trains background as an explicit class and relies on focal loss to down-weight it)')
     parser.add_argument('--use_weighted_sampler', action='store_true', help='use weighted sampler to address class imbalance in training data', required=False)
+    parser.add_argument('--loss', default='focal', choices=['focal', 'dice_ce'], help='training loss: "focal" (default) or "dice_ce" (Dice + class-weighted CE, recommended for heavy class imbalance)', required=False)
     args = parser.parse_args()
     return args
 
@@ -1762,6 +1824,7 @@ if __name__ == "__main__":
     use_weighted_sampler = args.use_weighted_sampler
     early_stopping_patience = args.early_stopping_patience
     num_workers = args.num_workers
+    loss_name = args.loss
 
     if data_leakage:
         print(" CAUTION: \n Data leakage is allowed in cross validation! \n Subimages from one original image might be placed in training and validation set.")
@@ -1786,7 +1849,8 @@ if __name__ == "__main__":
                           data_leakage=data_leakage,
                           ignore_background=ignore_background,
                           use_weighted_sampler=use_weighted_sampler,
-                          num_workers=num_workers
+                          num_workers=num_workers,
+                          loss_name=loss_name,
                           )
         for encoder in encoder_list:
             trainer.set_encoder(encoder) # set encoder for model
