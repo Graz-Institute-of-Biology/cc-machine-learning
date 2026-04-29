@@ -106,15 +106,22 @@ class DiceCEWeighted(torch.nn.Module):
 
     Dice operates at the segment level so rare classes can't be ignored by
     predicting them as background; class-weighted CE adds per-pixel calibration
-    with emphasis on rare classes (weights typically 1/sqrt(freq)).
+    with emphasis on rare classes. ce_ignore_index skips a class (e.g. background)
+    in CE; dice_classes restricts Dice to a subset of channels so the two
+    components stay consistent when background is ignored.
     Expects y_pred as logits; one-hot targets are argmax'd to class indices.
     """
     __name__ = 'DiceCE_loss'
 
-    def __init__(self, class_weights, dice_weight=0.5, ce_weight=0.5):
+    def __init__(self, class_weights, dice_weight=0.5, ce_weight=0.5,
+                 ce_ignore_index=-100, dice_classes=None):
         super().__init__()
-        self._dice = smp.losses.DiceLoss(mode='multiclass', from_logits=True)
-        self._ce = torch.nn.CrossEntropyLoss(weight=class_weights)
+        self._dice = smp.losses.DiceLoss(
+            mode='multiclass', from_logits=True, classes=dice_classes
+        )
+        self._ce = torch.nn.CrossEntropyLoss(
+            weight=class_weights, ignore_index=ce_ignore_index
+        )
         self.dice_w = dice_weight
         self.ce_w = ce_weight
 
@@ -187,6 +194,8 @@ class Trainer():
                  use_weighted_sampler=False,
                  num_workers=4,
                  loss_name='focal',
+                 class_weight_power=0.5,
+                 bg_weight_multiplier=1.0,
                  ):
 
         self.size = size
@@ -198,6 +207,8 @@ class Trainer():
         self.ignore_background = ignore_background
         self.use_weighted_sampler = use_weighted_sampler
         self.loss_name = loss_name
+        self.class_weight_power = class_weight_power
+        self.bg_weight_multiplier = bg_weight_multiplier
         self.config_file = config_file
         self.device = device
         self.epochs = epochs
@@ -519,73 +530,153 @@ class Trainer():
         self.unique_val_imgs = []
 
 
-    def split_train_val(self, shuffled_original):
+    def compute_per_image_class_presence(self, unique_imgs):
+        """Binary class-presence matrix (N_images × N_classes) built from mask tiles.
 
-            val_fold_size = len(shuffled_original) // self.n_folds
-            val_start = self.cross_val_run * val_fold_size
-            val_end = val_start + val_fold_size if self.cross_val_run < self.n_folds - 1 else len(shuffled_original)
-            
-            unique_val_imgs = shuffled_original[val_start:val_end]
-            unique_train_imgs = shuffled_original[:val_start] + shuffled_original[val_end:]
-            print("Val start: ", val_start)
-            print("Val end: ", val_end)
-            print("Train images: ", len(unique_train_imgs))
-            print("Val images: ", len(unique_val_imgs))
+        An image is marked present for class c if any of its tiles contain ≥1 pixel
+        of c. Used by iterative_stratification_split to balance rare classes across
+        CV folds before the train/val split is determined.
+        """
+        print("\nComputing per-image class presence for stratified splitting...")
+        img_to_idx = {img: i for i, img in enumerate(unique_imgs)}
+        presence = np.zeros((len(unique_imgs), len(self.class_values)), dtype=np.float32)
 
-            return unique_train_imgs, unique_val_imgs
+        for tile_fn in self.ids:
+            stem = tile_fn.split("_part")[0]
+            if stem not in img_to_idx:
+                continue
+            mask_fn = tile_fn.replace(".JPG", ".png").replace(".jpg", ".png")
+            mask = cv2.imread(str(os.path.join(self.mask_dir, mask_fn)), cv2.IMREAD_UNCHANGED)
+            if mask is None:
+                continue
+            img_idx = img_to_idx[stem]
+            for cls_idx, cls_val in enumerate(self.class_values):
+                if np.any(mask == cls_val):
+                    presence[img_idx, cls_idx] = 1.0
+
+        print(f"{'Class':<20} {'Images with class':>18} {'%':>6}")
+        print("-" * 48)
+        for cls_idx, label in enumerate(self.labels):
+            n = int(presence[:, cls_idx].sum())
+            print(f"{label:<20} {n:>18} {100 * n / len(unique_imgs):>5.1f}%")
+        return presence
+
+    def iterative_stratification_split(self, imgs, presence):
+        """Assign images to k folds using iterative stratification (Sechidis et al. 2011).
+
+        Returns (train_imgs, val_imgs) for self.cross_val_run. Each fold receives a
+        proportional share of every class's image-level prevalence, including the
+        rarest ones. This prevents the skewed ratios (e.g. barkdominated T/V = 0.33×)
+        that occur with random shuffling when class coverage is sparse.
+        """
+        N, C = presence.shape
+        fold_assignments = np.full(N, -1, dtype=int)
+        # Desired number of class-c images per fold, initialised from global counts.
+        desired = np.tile(presence.sum(axis=0) / self.n_folds, (self.n_folds, 1))  # (k, C)
+        remaining = list(range(N))
+
+        while remaining:
+            counts = presence[remaining].sum(axis=0)
+            active = np.where(counts > 0)[0]
+
+            if len(active) == 0:
+                # Only unlabelled (all-zero) images left — balance by fold size.
+                for i in remaining:
+                    sizes = np.bincount(fold_assignments[fold_assignments >= 0],
+                                        minlength=self.n_folds)
+                    fold_assignments[i] = int(np.argmin(sizes))
+                break
+
+            # Process the rarest active class first (minimises label imbalance).
+            rarest = int(active[np.argmin(counts[active])])
+            class_imgs = [i for i in remaining if presence[i, rarest]]
+
+            for i in class_imgs:
+                target = int(np.argmax(desired[:, rarest]))
+                fold_assignments[i] = target
+                remaining.remove(i)
+                for c in range(C):
+                    if presence[i, c]:
+                        desired[target, c] = max(0.0, desired[target, c] - 1.0)
+
+        val_imgs   = [imgs[i] for i in range(N) if fold_assignments[i] == self.cross_val_run]
+        train_imgs = [imgs[i] for i in range(N) if fold_assignments[i] != self.cross_val_run]
+
+        # Report per-class image-level balance so fold quality is visible in the log.
+        print(f"\nStratified split — fold {self.cross_val_run}/{self.n_folds}: "
+              f"{len(train_imgs)} train / {len(val_imgs)} val images")
+        print(f"{'Class':<20} {'Train imgs':>10} {'Val imgs':>9} {'T/V ratio':>10}")
+        print("-" * 52)
+        train_set, val_set = set(train_imgs), set(val_imgs)
+        for cls_idx, label in enumerate(self.labels):
+            t = sum(1 for i, img in enumerate(imgs) if img in train_set and presence[i, cls_idx])
+            v = sum(1 for i, img in enumerate(imgs) if img in val_set   and presence[i, cls_idx])
+            ratio = t / v if v > 0 else float('inf')
+            print(f"{label:<20} {t:>10} {v:>9} {ratio:>10.2f}x")
+        print()
+        return train_imgs, val_imgs
+
+    def split_train_val(self, imgs):
+        """Split imgs into (train_imgs, val_imgs) for self.cross_val_run.
+
+        Uses iterative stratification when per-image class presence has been
+        computed (cross-validation mode). Falls back to the original contiguous-
+        slice random split for non-CV or legacy paths.
+        """
+        if hasattr(self, '_image_presence'):
+            presence = np.array([
+                self._image_presence.get(img, np.zeros(len(self.class_values)))
+                for img in imgs
+            ])
+            return self.iterative_stratification_split(imgs, presence)
+
+        # Original random-slice fallback.
+        val_fold_size = len(imgs) // self.n_folds
+        val_start = self.cross_val_run * val_fold_size
+        val_end   = val_start + val_fold_size if self.cross_val_run < self.n_folds - 1 else len(imgs)
+        unique_val_imgs   = imgs[val_start:val_end]
+        unique_train_imgs = imgs[:val_start] + imgs[val_end:]
+        print(f"Val start: {val_start}  Val end: {val_end}  "
+              f"Train: {len(unique_train_imgs)}  Val: {len(unique_val_imgs)}")
+        return unique_train_imgs, unique_val_imgs
 
 
     def get_mixed_train_val_imgs(self, sorted_unique_imgs):
-
-        campina_imgs = [x for x in sorted_unique_imgs if x.split("_")[1] == "C"]
+        # Split per research site so each site's class balance is preserved
+        # independently. Shuffling is omitted — iterative_stratification_split
+        # assigns by label, not position, so pre-shuffling has no effect.
+        campina_imgs    = [x for x in sorted_unique_imgs if x.split("_")[1] == "C"]
         terra_firme_imgs = [x for x in sorted_unique_imgs if x.split("_")[1] == "TF"]
 
-        np.random.shuffle(campina_imgs)
-        np.random.shuffle(terra_firme_imgs)
+        tf_train, tf_val = self.split_train_val(terra_firme_imgs)
+        c_train,  c_val  = self.split_train_val(campina_imgs)
 
-        tf_shuffled_unique_train_imgs, tf_shuffled_unique_val_imgs = self.split_train_val(terra_firme_imgs)
-        c_shuffled_unique_train_imgs, c_shuffled_unique_val_imgs = self.split_train_val(campina_imgs)
-
-        unique_train_imgs = tf_shuffled_unique_train_imgs + c_shuffled_unique_train_imgs
-        unique_val_imgs = tf_shuffled_unique_val_imgs + c_shuffled_unique_val_imgs
-
-        return unique_train_imgs, unique_val_imgs
+        return tf_train + c_train, tf_val + c_val
 
     def get_mixed_snow_train_val_imgs(self, sorted_unique_imgs):
-
-        snow_imgs = [x for x in sorted_unique_imgs if "september" in x]
+        snow_imgs     = [x for x in sorted_unique_imgs if "september" in x]
         non_snow_imgs = [x for x in sorted_unique_imgs if "september" not in x]
 
-        np.random.shuffle(snow_imgs)
-        np.random.shuffle(non_snow_imgs)
+        ns_train, ns_val = self.split_train_val(non_snow_imgs)
+        s_train,  s_val  = self.split_train_val(snow_imgs)
 
-        non_snow_shuffled_unique_train_imgs, non_snow_shuffled_unique_val_imgs = self.split_train_val(non_snow_imgs)
-        snow_shuffled_unique_train_imgs, snow_shuffled_unique_val_imgs = self.split_train_val(snow_imgs)
-
-        unique_train_imgs = non_snow_shuffled_unique_train_imgs + snow_shuffled_unique_train_imgs
-        unique_val_imgs = non_snow_shuffled_unique_val_imgs + snow_shuffled_unique_val_imgs
-
-        return unique_train_imgs, unique_val_imgs
+        return ns_train + s_train, ns_val + s_val
 
     def get_train_val_imgs(self, sorted_unique_imgs, train_split):
-        
-        shuffled_original = sorted_unique_imgs.copy()
-        np.random.shuffle(shuffled_original)
-
-
         if self.cross_validation:
-            unique_train_imgs, unique_val_imgs = self.split_train_val(shuffled_original)
+            # Stratified split: ordering is irrelevant, stratification assigns by label.
+            return self.split_train_val(sorted_unique_imgs)
         else:
-            train_len_ = int(len(sorted_unique_imgs) * train_split)
-            unique_train_imgs = shuffled_original[:train_len_]
-            unique_val_imgs = shuffled_original[train_len_:]
-
-        return unique_train_imgs, unique_val_imgs
+            # Non-CV holdout: random shuffle then slice.
+            shuffled = sorted_unique_imgs.copy()
+            np.random.shuffle(shuffled)
+            train_len = int(len(shuffled) * train_split)
+            return shuffled[:train_len], shuffled[train_len:]
 
     def set_unique_paths(self, train_split, sorted_unique_imgs):
 
         if self.research_site == "mixed":
-            unique_train_imgs, unique_val_imgs = self.get_mixed_train_val_imgs(sorted_unique_imgs, train_split)
+            unique_train_imgs, unique_val_imgs = self.get_mixed_train_val_imgs(sorted_unique_imgs)
         
         
         else:
@@ -682,6 +773,11 @@ class Trainer():
 
         elif len(sorted_unique_imgs) >= num_unique:
             print("Multiple images found! Using unique images to tackle data leakage")
+            if self.cross_validation:
+                presence = self.compute_per_image_class_presence(sorted_unique_imgs)
+                self._image_presence = {
+                    img: presence[i] for i, img in enumerate(sorted_unique_imgs)
+                }
             self.set_unique_paths(self.train_split, sorted_unique_imgs)
 
 
@@ -874,15 +970,40 @@ class Trainer():
         if self.loss_name == 'focal':
             self.loss = FocalLossIgnoreBackground() if self.ignore_background else MultiClassFocalLoss()
         elif self.loss_name == 'dice_ce':
-            # Per-class weights: 1/sqrt(freq) normalized so mean weight = 1.
-            # Keeps the overall loss scale comparable to unweighted CE while
-            # boosting rare classes (cyanosbark ~7x background, vs. ~370x with raw 1/freq).
+            # Per-class weights: 1 / freq^p normalized so mean weight = 1.
+            # p=0.5 (sqrt) is mild; p=0.75 pushes rare classes harder; p=1.0 is
+            # full inverse-frequency and can be unstable with tiny classes.
             freq = self.train_class_counts / max(self.train_class_counts.sum(), 1.0)
-            w = 1.0 / np.sqrt(freq + 1e-8)
+            w = 1.0 / np.power(freq + 1e-8, self.class_weight_power)
             w = w / w.mean()
-            print(f"CE class weights: {dict(zip(self.labels, np.round(w, 3)))}")
+
+            # Background handling: multiplier < 1 downweights, 0 hard-ignores.
+            # Hard-ignore also drops background from Dice so both loss components
+            # agree. Only applies when background (value=0) is actually a channel.
+            bg_idx = self.class_values.index(0) if 0 in self.class_values else None
+            hard_ignore_bg = bg_idx is not None and self.bg_weight_multiplier == 0.0
+            if bg_idx is not None:
+                w[bg_idx] *= self.bg_weight_multiplier
+
+            print(f"CE class weights (p={self.class_weight_power}, "
+                  f"bg_mult={self.bg_weight_multiplier}): "
+                  f"{dict(zip(self.labels, np.round(w, 3)))}")
             class_weights_t = torch.tensor(w, dtype=torch.float32, device=self.device)
-            self.loss = DiceCEWeighted(class_weights=class_weights_t)
+
+            if hard_ignore_bg:
+                ce_ignore_index = bg_idx
+                dice_classes = [i for i in range(len(self.class_values)) if i != bg_idx]
+                print(f"Hard-ignoring background: CE ignore_index={bg_idx}, "
+                      f"Dice classes={dice_classes}")
+            else:
+                ce_ignore_index = -100  # nn.CrossEntropyLoss default (no skipping)
+                dice_classes = None
+
+            self.loss = DiceCEWeighted(
+                class_weights=class_weights_t,
+                ce_ignore_index=ce_ignore_index,
+                dice_classes=dice_classes,
+            )
         else:
             raise ValueError(f"Unknown loss_name: {self.loss_name}")
 
@@ -905,7 +1026,7 @@ class Trainer():
                 self.optimizer, 
                 mode='max',           # Maximize validation IoU
                 factor=0.5,           # Cut LR in half
-                patience=20,          # Wait 20 epochs before reducing
+                patience=10,          # Wait 10 epochs before reducing
                 verbose=True
             )
 
@@ -1789,8 +1910,10 @@ def parse_args():
     parser.add_argument('--early_stopping_patience', default=0, type=int, help='stop training if val IoU does not improve for this many epochs; 0 disables early stopping', required=False)
     parser.add_argument('--num_workers', default=16, type=int, help='number of DataLoader worker processes for data loading; increase to reduce GPU idle time', required=False)
     parser.add_argument('--ignore_background', default=False, action=argparse.BooleanOptionalAction, help='exclude background class from training and mask it out of the loss/metric (default: False; the default path trains background as an explicit class and relies on focal loss to down-weight it)')
-    parser.add_argument('--use_weighted_sampler', action='store_true', help='use weighted sampler to address class imbalance in training data', required=False)
+    parser.add_argument('--use_weighted_sampler', default=True, help='use weighted sampler to address class imbalance in training data', required=False)
     parser.add_argument('--loss', default='focal', choices=['focal', 'dice_ce'], help='training loss: "focal" (default) or "dice_ce" (Dice + class-weighted CE, recommended for heavy class imbalance)', required=False)
+    parser.add_argument('--class_weight_power', default=0.5, type=float, help='exponent p in CE class weight = 1/freq^p (dice_ce only). 0.5=sqrt (mild), 0.75=stronger rare-class push, 1.0=full inverse frequency (aggressive, can be unstable).', required=False)
+    parser.add_argument('--bg_weight_multiplier', default=1.0, type=float, help='multiplies the background CE weight (dice_ce only). 1.0=default, 0.25=soft downweight, 0.0=hard ignore (also drops background from Dice).', required=False)
     args = parser.parse_args()
     return args
 
@@ -1825,6 +1948,8 @@ if __name__ == "__main__":
     early_stopping_patience = args.early_stopping_patience
     num_workers = args.num_workers
     loss_name = args.loss
+    class_weight_power = args.class_weight_power
+    bg_weight_multiplier = args.bg_weight_multiplier
 
     if data_leakage:
         print(" CAUTION: \n Data leakage is allowed in cross validation! \n Subimages from one original image might be placed in training and validation set.")
@@ -1851,6 +1976,8 @@ if __name__ == "__main__":
                           use_weighted_sampler=use_weighted_sampler,
                           num_workers=num_workers,
                           loss_name=loss_name,
+                          class_weight_power=class_weight_power,
+                          bg_weight_multiplier=bg_weight_multiplier,
                           )
         for encoder in encoder_list:
             trainer.set_encoder(encoder) # set encoder for model
