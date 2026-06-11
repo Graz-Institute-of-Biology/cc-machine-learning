@@ -21,3 +21,4 @@ settings.local.json
 *.png
 *.yml
 *.txt
+*.out
