@@ -26,6 +26,9 @@ ssl._create_default_https_context = ssl._create_unverified_context
 import json
 import wandb
 import sys
+import traceback
+import shutil
+import datetime
 
 
 class RecordingWeightedSampler(WeightedRandomSampler):
@@ -62,12 +65,14 @@ class FocalLossIgnoreBackground(torch.nn.Module):
 
 
 class IoUIgnoreBackground(torch.nn.Module):
-    """IoU metric that ignores background pixels (where all target channels are zero).
+    """Argmax-based IoU that ignores background pixels (where all target channels
+    are zero). Used when ignore_background=True (no background channel in the model).
 
-    Background pixels can create false positives when the softmax output exceeds the
-    threshold for any class. Zeroing out predictions on background pixels eliminates
-    these spurious false positives without affecting TP or FN counts.
-    Expects y_pred as logits — applies softmax internally.
+    argmax assigns every pixel to exactly one class, so no pixels are dropped the
+    way threshold-0.5 on softmax drops low-confidence (typically rare-class) pixels
+    where no channel exceeds 0.5. Background pixels then have predictions zeroed
+    out so they cannot become false positives.
+    Expects y_pred as logits — argmax is invariant to softmax so it's skipped.
     """
     __name__ = 'iou_score'
 
@@ -76,10 +81,12 @@ class IoUIgnoreBackground(torch.nn.Module):
         self._iou = smp_metrics.IoU(threshold=threshold)
 
     def forward(self, y_pred, y_true):
-        y_pred = torch.softmax(y_pred, dim=1)
+        pred_idx = y_pred.argmax(dim=1)
+        pred_onehot = torch.nn.functional.one_hot(
+            pred_idx, num_classes=y_pred.shape[1]
+        ).permute(0, 3, 1, 2).float()
         fg_mask = (y_true.sum(dim=1, keepdim=True) > 0).float()  # (B, 1, H, W)
-        # Zero out predictions on background pixels so they cannot become false positives
-        return self._iou(y_pred * fg_mask, y_true)
+        return self._iou(pred_onehot * fg_mask, y_true)
 
 
 class MultiClassFocalLoss(torch.nn.Module):
@@ -130,11 +137,50 @@ class DiceCEWeighted(torch.nn.Module):
         return self.dice_w * self._dice(y_pred, y_true_idx) + self.ce_w * self._ce(y_pred, y_true_idx)
 
 
+class TverskyCEWeighted(torch.nn.Module):
+    """Compound Tversky + class-weighted cross-entropy on logits.
+
+    Tversky generalizes Dice with separate FP/FN weights:
+      loss = 1 - TP / (TP + alpha*FP + beta*FN)
+      alpha=beta=0.5  → Dice
+      beta > alpha    → penalises false negatives harder, raising recall on rare
+                        classes (the binding constraint when classes are visually
+                        similar, e.g. cyanosbark vs cyanosmoss).
+    Combined with class-weighted CE for per-pixel calibration. Background
+    handling (ce_ignore_index, tversky_classes) mirrors DiceCEWeighted so the
+    two loss components stay consistent.
+    Expects y_pred as logits; one-hot targets are argmax'd to class indices.
+    """
+    __name__ = 'TverskyCE_loss'
+
+    def __init__(self, class_weights, tversky_weight=0.5, ce_weight=0.5,
+                 alpha=0.3, beta=0.7,
+                 ce_ignore_index=-100, tversky_classes=None):
+        super().__init__()
+        self._tversky = smp.losses.TverskyLoss(
+            mode='multiclass', from_logits=True, classes=tversky_classes,
+            alpha=alpha, beta=beta,
+        )
+        self._ce = torch.nn.CrossEntropyLoss(
+            weight=class_weights, ignore_index=ce_ignore_index
+        )
+        self.t_w = tversky_weight
+        self.ce_w = ce_weight
+
+    def forward(self, y_pred, y_true):
+        y_true_idx = y_true.argmax(dim=1).long()
+        return self.t_w * self._tversky(y_pred, y_true_idx) + self.ce_w * self._ce(y_pred, y_true_idx)
+
+
 class IoUForegroundOnly(torch.nn.Module):
-    """IoU over foreground channels only (excludes channel 0 = background).
-    Keeps the reported metric comparable to IoUIgnoreBackground while the model
-    is trained on all classes including background.
-    Expects y_pred as logits — applies softmax internally.
+    """Argmax-based IoU over foreground channels only (excludes channel 0 = background).
+    Pixels predicted as background simply don't appear in any FG channel — counted
+    as FN for the true FG class with no FP, which is the correct behavior.
+
+    Argmax avoids the threshold-0.5 trap on multiclass softmax: with C classes,
+    softmax peaks often sit at 0.3-0.5 on ambiguous (typically rare-class) pixels,
+    so threshold-0.5 silently drops them from both TP and FP counts.
+    Expects y_pred as logits — argmax is invariant to softmax so it's skipped.
     """
     __name__ = 'iou_score'
 
@@ -143,15 +189,18 @@ class IoUForegroundOnly(torch.nn.Module):
         self._iou = smp_metrics.IoU(threshold=threshold)
 
     def forward(self, y_pred, y_true):
-        y_pred = torch.softmax(y_pred, dim=1)
-        return self._iou(y_pred[:, 1:], y_true[:, 1:])
+        pred_idx = y_pred.argmax(dim=1)
+        pred_onehot = torch.nn.functional.one_hot(
+            pred_idx, num_classes=y_pred.shape[1]
+        ).permute(0, 3, 1, 2).float()
+        return self._iou(pred_onehot[:, 1:], y_true[:, 1:])
 
 
 class IoUBackgroundOnly(torch.nn.Module):
-    """IoU over the background channel only (channel 0). Reported alongside
-    the foreground IoU so the model's background-vs-foreground behavior is
-    visible without contaminating the main model-selection metric.
-    Expects y_pred as logits — applies softmax internally.
+    """Argmax-based IoU over the background channel only (channel 0).
+    Reported alongside the foreground IoU so the model's background-vs-foreground
+    behavior is visible without contaminating the main model-selection metric.
+    Expects y_pred as logits — argmax is invariant to softmax so it's skipped.
     """
     __name__ = 'iou_background'
 
@@ -160,8 +209,11 @@ class IoUBackgroundOnly(torch.nn.Module):
         self._iou = smp_metrics.IoU(threshold=threshold)
 
     def forward(self, y_pred, y_true):
-        y_pred = torch.softmax(y_pred, dim=1)
-        return self._iou(y_pred[:, :1], y_true[:, :1])
+        pred_idx = y_pred.argmax(dim=1)
+        pred_onehot = torch.nn.functional.one_hot(
+            pred_idx, num_classes=y_pred.shape[1]
+        ).permute(0, 3, 1, 2).float()
+        return self._iou(pred_onehot[:, :1], y_true[:, :1])
 
 
 class Trainer():
@@ -196,6 +248,12 @@ class Trainer():
                  loss_name='focal',
                  class_weight_power=0.5,
                  bg_weight_multiplier=1.0,
+                 save_confusion_each_epoch=False,
+                 tversky_alpha=0.3,
+                 tversky_beta=0.7,
+                 hard_sample_target=None,
+                 hard_sample_strength=2.0,
+                 hard_sample_ema=0.7,
                  ):
 
         self.size = size
@@ -209,6 +267,13 @@ class Trainer():
         self.loss_name = loss_name
         self.class_weight_power = class_weight_power
         self.bg_weight_multiplier = bg_weight_multiplier
+        self.save_confusion_each_epoch = save_confusion_each_epoch
+        self.tversky_alpha = tversky_alpha
+        self.tversky_beta = tversky_beta
+        self.hard_sample_target = hard_sample_target
+        self.hard_sample_strength = hard_sample_strength
+        self.hard_sample_ema = hard_sample_ema
+        self.hard_sample_target_idx = None  # resolved in create_dataloaders
         self.config_file = config_file
         self.device = device
         self.epochs = epochs
@@ -410,9 +475,6 @@ class Trainer():
 
         wandb.init(
             project=self.wandb_project,
-            settings=wandb.Settings(
-                    _cuda_device_ids=[0]  # index 0 within CUDA_VISIBLE_DEVICES, i.e. your actual GPU
-                ),
             name=self.exp_dir.stem,
             job_type='ml-prediction',
             config={
@@ -707,6 +769,82 @@ class Trainer():
 
 
 
+    def snapshot_run_artifacts(self):
+        """Copy the code + config that produced this run into exp_dir/code_snapshot/.
+
+        Makes each experiment self-contained: the training script, the resolved
+        config YAML, and the ontology JSON are archived alongside the model and
+        logs, plus a run_config.json capturing the resolved hyperparameters,
+        full command line, and git commit. This replaces the old practice of
+        freezing a whole separate copy of the script per project.
+
+        Best-effort: any individual copy failure is logged, not raised, so a
+        snapshot problem never aborts a training run.
+        """
+        snap_dir = os.path.join(self.exp_dir, "code_snapshot")
+        try:
+            os.makedirs(snap_dir, exist_ok=True)
+
+            # 1. The training script actually being executed.
+            try:
+                shutil.copy2(os.path.abspath(__file__), snap_dir)
+            except Exception as e:
+                print(f"[snapshot] could not copy training script: {e}")
+
+            # 2. Config YAML and ontology JSON (relative to cwd or absolute).
+            for src in [getattr(self, "config_file", None),
+                        getattr(self, "ontology_file_name", None)]:
+                if src and os.path.isfile(src):
+                    try:
+                        shutil.copy2(src, snap_dir)
+                    except Exception as e:
+                        print(f"[snapshot] could not copy {src}: {e}")
+
+            # 3. Resolved run config — the values that actually drove the run.
+            run_config = {
+                "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+                "git_commit": self.get_git_commit_hash(),
+                "command_line": " ".join(sys.argv),
+                "exp_dir": str(self.exp_dir),
+                "encoder": self.encoder,
+                "encoder_weights": self.encoder_weights,
+                "seed": self.seed,
+                "size": self.size,
+                "epochs": self.epochs,
+                "batch_size": self.batch_size,
+                "accumulation_steps": self.accumulation_steps,
+                "lr": self.lr,
+                "weight_decay": self.weight_decay,
+                "optimizer": self.optimizer_name,
+                "lr_scheduler": self.lr_scheduler,
+                "loss_name": self.loss_name,
+                "class_weight_power": self.class_weight_power,
+                "bg_weight_multiplier": self.bg_weight_multiplier,
+                "tversky_alpha": self.tversky_alpha,
+                "tversky_beta": self.tversky_beta,
+                "hard_sample_target": self.hard_sample_target,
+                "hard_sample_strength": self.hard_sample_strength,
+                "hard_sample_ema": self.hard_sample_ema,
+                "ignore_background": self.ignore_background,
+                "use_weighted_sampler": self.use_weighted_sampler,
+                "memory_optimized": self.memory_optimized,
+                "cross_validation": self.cross_validation,
+                "cross_val_run": self.cross_val_run,
+                "n_folds": self.n_folds,
+                "num_workers": self.num_workers,
+                "config_file": getattr(self, "config_file", None),
+                "ontology_file": getattr(self, "ontology_file_name", None),
+                "labels": getattr(self, "labels", None),
+                "class_values": getattr(self, "class_values", None),
+            }
+            with open(os.path.join(snap_dir, "run_config.json"), "w") as f:
+                json.dump(run_config, f, indent=2)
+
+            print(f"[snapshot] code + config archived to {snap_dir}")
+        except Exception as e:
+            print(f"[snapshot] failed (training continues): {e}")
+
+
     def set_paths(self, cross_val_run=0, train=False, test=False, pred=False):
         """Set train, valid, test paths for images and masks.
         """
@@ -729,6 +867,11 @@ class Trainer():
             os.makedirs(self.exp_dir)
 
             self.model_save_path = os.path.join(self.exp_dir, 'best_model.pth')
+
+            # Snapshot the exact code + config that produced this run into the
+            # experiment folder, so a run is self-contained and reproducible
+            # without relying on a frozen copy of the script elsewhere.
+            self.snapshot_run_artifacts()
 
         if test:
             self.exp_dirs = [x for x in os.listdir(Path(self.yaml_file["exp_dir"])) if encoder in x]
@@ -879,6 +1022,26 @@ class Trainer():
 
         self.sampler = sampler
         
+        # Hard-sampling state: base weights stay immutable so EMA-tracked
+        # per-tile hardness can multiply against them each epoch without
+        # compounding. Hardness starts at zero (= baseline weighting).
+        self.base_sample_weights = np.array(self.sample_weights, dtype=np.float64)
+        self.tile_hardness = np.zeros(len(self.sample_weights), dtype=np.float64)
+        if self.hard_sample_target is not None:
+            if sampler is None:
+                raise ValueError(
+                    "--hard_sample_target requires --use_weighted_sampler (a "
+                    "WeightedRandomSampler is needed to bias tile draws)."
+                )
+            if self.hard_sample_target not in self.labels:
+                raise ValueError(
+                    f"hard_sample_target='{self.hard_sample_target}' not in labels {self.labels}"
+                )
+            self.hard_sample_target_idx = self.labels.index(self.hard_sample_target)
+            print(f"Hard sampling ON: target='{self.hard_sample_target}' "
+                  f"(channel {self.hard_sample_target_idx}), "
+                  f"strength={self.hard_sample_strength}, ema={self.hard_sample_ema}")
+
         self.train_loader = DataLoader(self.train_dataset,
                                         batch_size=self.batch_size,
                                         sampler=sampler,
@@ -962,6 +1125,13 @@ class Trainer():
             print("Gradient checkpointing enabled for MiT encoder")
 
         
+        if self.pred:
+            # Inference path: no loss/optimizer/scheduler/epoch runners needed.
+            # Skips the dice_ce branch's dependency on self.train_class_counts,
+            # which is only populated by create_dataloaders during training.
+            self.setup_pred_logging()
+            return
+
         if self.ignore_background:
             self.metrics = [IoUIgnoreBackground(threshold=0.5)]
         else:
@@ -1003,6 +1173,40 @@ class Trainer():
                 class_weights=class_weights_t,
                 ce_ignore_index=ce_ignore_index,
                 dice_classes=dice_classes,
+            )
+        elif self.loss_name == 'tversky_ce':
+            # Same class-weight + bg handling as dice_ce; only the segment-level
+            # loss term swaps Dice → Tversky to expose the FP/FN trade-off via
+            # alpha/beta (beta>alpha pushes recall on rare classes).
+            freq = self.train_class_counts / max(self.train_class_counts.sum(), 1.0)
+            w = 1.0 / np.power(freq + 1e-8, self.class_weight_power)
+            w = w / w.mean()
+            bg_idx = self.class_values.index(0) if 0 in self.class_values else None
+            hard_ignore_bg = bg_idx is not None and self.bg_weight_multiplier == 0.0
+            if bg_idx is not None:
+                w[bg_idx] *= self.bg_weight_multiplier
+
+            print(f"Tversky alpha={self.tversky_alpha}, beta={self.tversky_beta}; "
+                  f"CE class weights (p={self.class_weight_power}, "
+                  f"bg_mult={self.bg_weight_multiplier}): "
+                  f"{dict(zip(self.labels, np.round(w, 3)))}")
+            class_weights_t = torch.tensor(w, dtype=torch.float32, device=self.device)
+
+            if hard_ignore_bg:
+                ce_ignore_index = bg_idx
+                tversky_classes = [i for i in range(len(self.class_values)) if i != bg_idx]
+                print(f"Hard-ignoring background: CE ignore_index={bg_idx}, "
+                      f"Tversky classes={tversky_classes}")
+            else:
+                ce_ignore_index = -100
+                tversky_classes = None
+
+            self.loss = TverskyCEWeighted(
+                class_weights=class_weights_t,
+                alpha=self.tversky_alpha,
+                beta=self.tversky_beta,
+                ce_ignore_index=ce_ignore_index,
+                tversky_classes=tversky_classes,
             )
         else:
             raise ValueError(f"Unknown loss_name: {self.loss_name}")
@@ -1049,10 +1253,7 @@ class Trainer():
             verbose=True,
         )
 
-        if self.pred:
-            self.setup_pred_logging()
-        else:
-            self.setup_logging()
+        self.setup_logging()
 
 
     def save_model(self, epoch, update_latest=False):
@@ -1112,17 +1313,19 @@ class Trainer():
             # image_ious = self.get_per_image_ious()
             
             # do something (save model, change lr, etc.)
-            if max_score < self.valid_logs['iou_score']:
+            is_best = self.valid_logs['iou_score'] > max_score
+            if is_best:
                 print('New top score: {0} > {1} '.format(self.valid_logs['iou_score'], max_score))
                 max_score = self.valid_logs['iou_score']
-        
+
                 self.save_model(epoch=epoch)
                 self.save_loss_plots()
 
                 if self.save_val_uncertainty:
                     self.save_uncertainty_images(epoch)
 
-            self.save_confusion_matrix(epoch=epoch)
+            if self.save_confusion_each_epoch or is_best:
+                self.save_confusion_matrix(epoch=epoch)
 
             self.train_log_df.loc[epoch] = [self.train_logs[self.loss.__name__], self.train_logs['iou_score']]
             self.valid_log_df.loc[epoch] = [self.valid_logs[self.loss.__name__], self.valid_logs['iou_score']]
@@ -1181,6 +1384,16 @@ class Trainer():
             train_loss_sum = 0
             train_metric_sums = {m.__name__: 0.0 for m in self.metrics}
             self.optimizer.zero_grad()
+
+            # Hard-sampling per-epoch accumulators (target-class FN/pixel sums
+            # indexed by *dataset tile index*; sampler may draw a tile multiple
+            # times so we aggregate and divide at end of epoch).
+            hs_active = self.hard_sample_target_idx is not None
+            if hs_active:
+                epoch_tile_fn = np.zeros(len(self.x_train), dtype=np.float64)
+                epoch_tile_target_px = np.zeros(len(self.x_train), dtype=np.float64)
+                sampler_indices = None  # captured on first batch (after DataLoader iter)
+
             pbar = tqdm(self.train_loader, desc='train')
 
             print("cuda available: ", torch.cuda.is_available())
@@ -1198,6 +1411,26 @@ class Trainer():
                 with torch.no_grad():
                     for m in self.metrics:
                         train_metric_sums[m.__name__] += m(pred.detach(), y).item()
+
+                    if hs_active:
+                        # Sampler's last_indices is populated when DataLoader
+                        # starts iterating; safe to read once we're inside the
+                        # loop. Snapshot it on the first batch.
+                        if sampler_indices is None:
+                            sampler_indices = list(self.sampler.last_indices)
+                        t = self.hard_sample_target_idx
+                        pred_idx = pred.argmax(dim=1)             # (B, H, W)
+                        target_truth = y[:, t]                    # (B, H, W) one-hot for target
+                        wrong = (pred_idx != t).float()
+                        per_fn = (target_truth * wrong).sum(dim=(1, 2)).cpu().numpy()
+                        per_px = target_truth.sum(dim=(1, 2)).cpu().numpy()
+                        bs = x.shape[0]
+                        start = batch_idx * self.batch_size
+                        for bi in range(bs):
+                            tile_idx = sampler_indices[start + bi]
+                            epoch_tile_fn[tile_idx] += per_fn[bi]
+                            epoch_tile_target_px[tile_idx] += per_px[bi]
+
                 postfix = {'loss': train_loss_sum/(batch_idx+1)}
                 for name, total in train_metric_sums.items():
                     postfix[name] = total / (batch_idx + 1)
@@ -1208,6 +1441,37 @@ class Trainer():
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                     self.optimizer.step()
                     self.optimizer.zero_grad()
+
+            # === HARD SAMPLING UPDATE ===
+            # End-of-epoch: blend this epoch's per-tile FN rate into the EMA
+            # hardness scores, then rebuild sampler weights for the next epoch.
+            # Tiles with no target-class pixels this epoch contribute 0 (their
+            # previous EMA hardness decays toward 0).
+            hs_stats = None
+            if hs_active:
+                seen = epoch_tile_target_px > 0
+                current_hardness = np.zeros_like(epoch_tile_target_px)
+                current_hardness[seen] = epoch_tile_fn[seen] / epoch_tile_target_px[seen]
+                self.tile_hardness = (
+                    self.hard_sample_ema * self.tile_hardness
+                    + (1.0 - self.hard_sample_ema) * current_hardness
+                )
+                new_weights = self.base_sample_weights * (
+                    1.0 + self.hard_sample_strength * self.tile_hardness
+                )
+                self.sampler.weights = torch.as_tensor(new_weights, dtype=torch.double)
+                hs_stats = {
+                    "hardsample/tiles_with_target_seen": int(seen.sum()),
+                    "hardsample/mean_target_fn_rate": float(current_hardness[seen].mean()) if seen.any() else 0.0,
+                    "hardsample/max_hardness_ema": float(self.tile_hardness.max()),
+                    "hardsample/max_weight_multiplier": float(
+                        (1.0 + self.hard_sample_strength * self.tile_hardness).max()
+                    ),
+                }
+                print(f"Hard sampling ep{epoch}: "
+                      f"tiles_seen={hs_stats['hardsample/tiles_with_target_seen']}, "
+                      f"mean_FN={hs_stats['hardsample/mean_target_fn_rate']:.3f}, "
+                      f"max_mult={hs_stats['hardsample/max_weight_multiplier']:.2f}")
 
             # === VALIDATION ===
             self.model.eval()
@@ -1230,13 +1494,27 @@ class Trainer():
                     val_loss_sum += loss.item()
                     for m in self.metrics:
                         val_metric_sums[m.__name__] += m(pred, y).item()
-                    probs = torch.softmax(pred, dim=1)
-                    binary = (probs > 0.5).float()
+                    # Argmax-based one-hot so each pixel contributes to exactly
+                    # one class; consistent with the IoU metric wrappers above
+                    # and avoids the threshold-0.5 dropout on low-peak softmax.
+                    pred_idx = pred.argmax(dim=1)
+                    binary = torch.nn.functional.one_hot(
+                        pred_idx, num_classes=C
+                    ).permute(0, 3, 1, 2).float()
                     tp_sum += (binary * y).sum(dim=(0, 2, 3))
                     fp_sum += (binary * (1 - y)).sum(dim=(0, 2, 3))
                     fn_sum += ((1 - binary) * y).sum(dim=(0, 2, 3))
 
             per_class_iou = (tp_sum / (tp_sum + fp_sum + fn_sum + 1e-7)).cpu().numpy()
+
+            # Corpus-wide foreground mean IoU. This is the model-selection signal:
+            # per-batch averaged IoU (val_metric_sums / len) is biased and noisy
+            # (std ~0.024 on this dataset), so a single-epoch peak there often
+            # picks a fluke. Aggregating TP/FP/FN across the whole val set first
+            # gives a stable, unbiased estimator. Background is excluded so
+            # selection isn't dominated by the 64%-of-pixels easy class.
+            bg_offset = 1 if 0 in self.class_values else 0
+            val_iou_corpus_fg = float(np.nanmean(per_class_iou[bg_offset:]))
 
             # === LOGGING ===
             self.train_logs = {
@@ -1248,9 +1526,10 @@ class Trainer():
                 **{name: total / len(self.valid_loader) for name, total in val_metric_sums.items()}
             }
 
-            if max_score < self.valid_logs['iou_score']:
-                print(f'New top score: {self.valid_logs["iou_score"]:.4f} > {max_score:.4f}')
-                max_score = self.valid_logs['iou_score']
+            is_best = val_iou_corpus_fg > max_score
+            if is_best:
+                print(f'New top score (corpus fg IoU): {val_iou_corpus_fg:.4f} > {max_score:.4f}')
+                max_score = val_iou_corpus_fg
                 epochs_without_improvement = 0
                 self.save_model(epoch=epoch)
                 self.save_loss_plots()
@@ -1259,13 +1538,14 @@ class Trainer():
             else:
                 epochs_without_improvement += 1
 
-            self.save_confusion_matrix(epoch=epoch)
+            if self.save_confusion_each_epoch or is_best:
+                self.save_confusion_matrix(epoch=epoch)
             self.train_log_df.loc[epoch] = [self.train_logs[self.loss.__name__], self.train_logs['iou_score']]
-            self.valid_log_df.loc[epoch] = [self.valid_logs[self.loss.__name__], self.valid_logs['iou_score']]
+            self.valid_log_df.loc[epoch] = [self.valid_logs[self.loss.__name__], self.valid_logs['iou_score'], val_iou_corpus_fg]
             self.train_log_df.to_csv(os.path.join(self.exp_dir, "train_log.csv"))
             self.valid_log_df.to_csv(os.path.join(self.exp_dir, "valid_log.csv"))
 
-            self.scheduler.step(self.valid_logs['iou_score'])
+            self.scheduler.step(val_iou_corpus_fg)
 
             sampled_counts = self.train_patch_counts[self.sampler.last_indices].sum(axis=0)
             sampled_total = sampled_counts.sum()
@@ -1288,6 +1568,7 @@ class Trainer():
                 "train/iou": self.train_logs["iou_score"],
                 "val/loss": self.valid_logs[self.loss.__name__],
                 "val/iou": self.valid_logs["iou_score"],
+                "val/iou_corpus_fg": val_iou_corpus_fg,
                 "learning_rate": self.optimizer.param_groups[0]['lr'],
                 **sampled_dist,
                 **per_class_iou_log,
@@ -1295,6 +1576,8 @@ class Trainer():
             if 'iou_background' in self.valid_logs:
                 wandb_log["train/iou_background"] = self.train_logs['iou_background']
                 wandb_log["val/iou_background"] = self.valid_logs['iou_background']
+            if hs_stats is not None:
+                wandb_log.update(hs_stats)
             wandb.log(wandb_log)
 
             if early_stopping_patience > 0 and epochs_without_improvement >= early_stopping_patience:
@@ -1311,7 +1594,7 @@ class Trainer():
             print("Cross val run: ", self.cross_val_run)
 
         self.train_log_df = pd.DataFrame(columns=[self.loss.__name__, 'iou_score'])
-        self.valid_log_df = pd.DataFrame(columns=[self.loss.__name__, 'iou_score'])
+        self.valid_log_df = pd.DataFrame(columns=[self.loss.__name__, 'iou_score', 'iou_corpus_fg'])
 
 
         if self.memory_optimized:
@@ -1330,46 +1613,69 @@ class Trainer():
         self.valid_log_df.to_csv(os.path.join(self.exp_dir, "valid_log.csv"))
 
 
-    def save_confusion_matrix(self, epoch):
-        cf_matrix = np.zeros((len(self.class_values), len(self.class_values)))
-        # Map raw pixel values to matrix indices (e.g. class value 9 → index 8 when background excluded)
-        val_to_idx = {v: i for i, v in enumerate(self.class_values)}
+    def save_confusion_matrix(self, epoch, tile_top_per_pair=20, tile_min_pixels=50):
+        """Accumulate the full-corpus confusion matrix over the validation set
+        and (optionally) emit a per-tile diagnostic CSV listing the validation
+        tiles that contribute the most pixels to each (true, pred) confusion
+        pair — useful when a stuck confusion (e.g. cyanosbark→cyanosmoss) is
+        suspected to be ground-truth labeling noise rather than model error.
+
+        Args:
+            epoch: integer epoch tag for output filenames.
+            tile_top_per_pair: keep at most this many tiles per (true, pred)
+                confusion pair in the diagnostic CSV. 0 disables the CSV.
+            tile_min_pixels: confusions with fewer pixels than this in a single
+                tile are not recorded (noise floor).
+        """
+        n_cls = len(self.class_values)
+        cf_matrix = np.zeros((n_cls, n_cls), dtype=np.int64)
+        val_to_label = {v: self.labels[i] for i, v in enumerate(self.class_values)}
+        # Full ordered label list — passing this to sklearn.confusion_matrix
+        # ensures every off-diagonal cell is counted, even confusions into
+        # classes not present in this tile's ground truth. Previous code
+        # filtered by labels-present-in-y_true, which silently dropped FPs
+        # into absent classes and inflated per-class precision.
+        all_labels = list(self.class_values)
+
+        tile_records = [] if tile_top_per_pair > 0 else None
 
         for n in range(len(self.valid_dataset)):
             image, gt_mask = self.valid_dataset[n]
             pred = self.calculate_prediction(image)
             gt_mask_2d, _ = self.get_2d_image(gt_mask)
 
-            y_pred_flattened = pred.flatten()
-            y_true_flattened = gt_mask_2d.flatten()
+            y_pred_flat = pred.flatten()
+            y_true_flat = gt_mask_2d.flatten()
 
-            # Use only foreground labels present in y_true for this image.
-            # Background-only patches (no class_values in y_true) are skipped.
-            # y_pred values outside these labels are ignored by sklearn (treated as misses).
-            true_labels = sorted(
-                {v for v in np.unique(y_true_flattened) if v in val_to_idx}
-            )
-            present_labels = sorted(
-                {v for v in np.unique(np.concatenate([y_true_flattened, y_pred_flattened]))
-                 if v in val_to_idx}
-            )
-            if not true_labels:
+            cf_matrix += confusion_matrix(y_true_flat, y_pred_flat, labels=all_labels)
+
+            if tile_records is None:
                 continue
 
-            # DEBUG
-            # print(f"[CFM DEBUG] image {n}")
-            # print(f"  y_true unique: {np.unique(y_true_flattened)}")
-            # print(f"  y_pred unique: {np.unique(y_pred_flattened)}")
-            # print(f"  true_labels: {true_labels}")
-            # print(f"  present_labels (true+pred): {present_labels}")
-            # print(f"  class_values: {self.class_values}")
-            # print(f"  val_to_idx: {val_to_idx}")
-
-            cf_m = confusion_matrix(y_true_flattened, y_pred_flattened, labels=true_labels)
-            for i, u_val in enumerate(true_labels):
-                for j, k_val in enumerate(true_labels):
-                    cf_matrix[val_to_idx[u_val]][val_to_idx[k_val]] += cf_m[i][j]
-
+            # Per-tile: for each true class present, count which non-target
+            # classes its pixels got assigned to. One entry per (true, pred)
+            # pair above the min_pixels noise floor.
+            tile_name = Path(self.x_valid[n]).name
+            for tv in np.unique(y_true_flat):
+                if tv not in val_to_label:
+                    continue
+                true_mask = y_true_flat == tv
+                true_total = int(true_mask.sum())
+                pred_subset = y_pred_flat[true_mask]
+                pred_vals, pred_counts = np.unique(pred_subset, return_counts=True)
+                for pv, pc in zip(pred_vals, pred_counts):
+                    if pv == tv or pv not in val_to_label or pc < tile_min_pixels:
+                        continue
+                    tile_records.append({
+                        'tile': tile_name,
+                        'true_class': val_to_label[tv],
+                        'pred_class': val_to_label[pv],
+                        'err_pixels': int(pc),
+                        'true_pixels_in_tile': true_total,
+                        'err_fraction': round(pc / true_total, 4) if true_total else 0.0,
+                        'image_path': self.x_valid[n],
+                        'mask_path': self.y_valid[n],
+                    })
 
         cf_matrix_normed = normalize(cf_matrix, axis=1, norm='l1')
         disp = ConfusionMatrixDisplay(cf_matrix_normed, display_labels=self.labels)
@@ -1378,6 +1684,7 @@ class Trainer():
         disp.plot(ax=ax, xticks_rotation='vertical', colorbar=False)
         plt.colorbar(disp.im_, boundaries=np.linspace(0, 1, 11))
         plt.savefig(os.path.join(self.exp_dir, "confusion_matrix_ep{0}.png".format(epoch)))
+        plt.close(fig)
 
         cfm_df = pd.DataFrame(columns=[self.labels], index=self.labels, data=cf_matrix_normed)
         cfm_df.to_csv(os.path.join(self.exp_dir, "confusion_matrix_ep{0}.csv".format(epoch)))
@@ -1387,6 +1694,19 @@ class Trainer():
         # (sum(CM[c,:]) + sum(CM[:,c]) - CM[c,c])
         cfm_raw_df = pd.DataFrame(columns=[self.labels], index=self.labels, data=cf_matrix)
         cfm_raw_df.to_csv(os.path.join(self.exp_dir, "confusion_matrix_raw_ep{0}.csv".format(epoch)))
+
+        if tile_records:
+            df = pd.DataFrame(tile_records)
+            df = (df.sort_values(['true_class', 'pred_class', 'err_pixels'],
+                                 ascending=[True, True, False])
+                    .groupby(['true_class', 'pred_class'], group_keys=False)
+                    .head(tile_top_per_pair)
+                    .reset_index(drop=True))
+            out_path = os.path.join(self.exp_dir, f"tile_confusions_ep{epoch}.csv")
+            df.to_csv(out_path, index=False)
+            print(f"Tile-level confusions saved: {out_path} "
+                  f"({len(df)} rows, top {tile_top_per_pair} per pair, "
+                  f"min {tile_min_pixels} px)")
 
 
 
@@ -1405,7 +1725,10 @@ class Trainer():
         ax[0].legend()
 
         ax[1].plot(self.train_log_df.index, self.train_log_df['iou_score'], label='train iou score')
-        ax[1].plot(self.valid_log_df.index, self.valid_log_df['iou_score'], label='valid iou score')
+        ax[1].plot(self.valid_log_df.index, self.valid_log_df['iou_score'], label='valid iou (per-batch avg)')
+        if 'iou_corpus_fg' in self.valid_log_df.columns:
+            ax[1].plot(self.valid_log_df.index, self.valid_log_df['iou_corpus_fg'],
+                       label='valid iou (corpus fg, selection signal)', linestyle='--')
         # ax[1].set_ylim(0.6, 1.0)
         ax[1].grid()
         ax[1].legend()
@@ -1506,14 +1829,8 @@ class Trainer():
         """
 
         print("Loading checkpoint from: ")
-        if not self.pred:
-            print(self.model_save_path)
-            # checkpoint = torch.load(self.model_save_path)
-            checkpoint = torch.load(self.model_save_path, map_location=self.device)
-        elif self.pred:
-            print(self.best_model_path)
-            # checkpoint = torch.load(self.best_model_path)
-            checkpoint = torch.load(self.model_save_path, map_location=self.device)
+        print(self.model_save_path)
+        checkpoint = torch.load(self.model_save_path, map_location=self.device)
         print("Checkpoint loaded!")
         self.print_summary(checkpoint)
         self.prepare_model()
@@ -1713,26 +2030,30 @@ class Trainer():
     def calculate_prediction(self, img, return_entropy=False):
         """calculate prediction for one image crop
 
+        Uses argmax over softmax channels so every pixel is assigned to exactly
+        one class, matching the in-loop IoU/CM accumulation. The previous
+        softmax→.round() (threshold-0.5) approach silently dropped pixels whose
+        peak probability was <0.5 (common for rare/ambiguous pixels in 8-class
+        softmax) — those pixels defaulted to value 0, inflating background
+        confusions in the CM and disagreeing with the in-loop selection signal.
+
         Args:
             img (np array): image read by opencv (color channels: BGR)
 
         Returns:
-            np array: mask array with class values, color coded with class colors
+            np array: mask with class values (background still possible if it's
+            a learned class — the model now actively predicts it).
         """
 
+        pr_mask = self.get_model_output(img)  # (1, C, H, W) softmax probabilities
+        probs = pr_mask.squeeze(0).cpu().numpy()  # (C, H, W)
+        class_entropies = -np.sum(probs * np.log2(probs + 1e-10), axis=0)
 
-        pr_mask = self.get_model_output(img)
-        pr_mask_e = (pr_mask.squeeze().cpu().numpy())
-        pr_mask = (pr_mask.squeeze().cpu().numpy().round())
-        class_entropies = -np.sum(pr_mask_e * np.log2(pr_mask_e + 1e-10), axis=0)
-        pr_mask = pr_mask.transpose(1, 2, 0)
-        out = np.zeros((pr_mask.shape[0], pr_mask.shape[1]), dtype=np.int64)
-
-        # for v in self.class_values:
-            # out[pr_mask[:,:,v] == 1] = v
-        
-        for channel_idx, class_val in enumerate(self.class_values):
-            out[pr_mask[:, :, channel_idx] == 1] = class_val
+        pred_idx = probs.argmax(axis=0)  # (H, W) channel index 0..C-1
+        # Map channel index → class value (e.g. when ignore_background=True,
+        # channel 0 may correspond to class value 1, etc.).
+        class_values_arr = np.asarray(self.class_values, dtype=np.int64)
+        out = class_values_arr[pred_idx]
 
         if return_entropy:
             return out, class_entropies
@@ -1748,10 +2069,24 @@ class Trainer():
         elif img_name.endswith(".jpg"):
             mask_name = img_name.replace(".jpg", "_mask.png")
 
-        save_path = os.path.join(self.test_dir, mask_name)
-        im = Image.fromarray(mask)
+        save_path = os.path.join(self.pred_output_dir, mask_name)
+
+        # Paletted PNG: file stores categorical class indices (recoverable via
+        # np.array(Image.open(...))), and the embedded palette maps each index
+        # to its ontology hex colour for human-readable visualisation.
+        im = Image.fromarray(mask.astype(np.uint8), mode="P")
+        palette = [0] * (256 * 3)
+        for entry in self.ontology["ontology"].values():
+            v = entry["value"]
+            hex_color = entry["color"].lstrip("#")
+            palette[3 * v:3 * v + 3] = [
+                int(hex_color[0:2], 16),
+                int(hex_color[2:4], 16),
+                int(hex_color[4:6], 16),
+            ]
+        im.putpalette(palette)
         im.save(save_path)
-        
+
     def save_entropy_image(self, entropies, img_name):
 
         if img_name.endswith(".JPG"):
@@ -1760,7 +2095,7 @@ class Trainer():
             img_name = img_name.replace(".jpg", "_entropy.png")
 
         plt.figure()
-        plt.imsave(os.path.join(self.test_dir, img_name), entropies)
+        plt.imsave(os.path.join(self.pred_output_dir, img_name), entropies)
         plt.close()
 
     def predict_whole_image(self, img, debug=False, get_entropies=False):
@@ -1787,9 +2122,8 @@ class Trainer():
         print("original img shape: ", original_img.shape)
         width = int(np.ceil(img.shape[1]/self.size) * self.size)
         height = int(np.ceil(img.shape[0]/self.size) * self.size)
-        padded_img = np.zeros((height, width, 3), dtype=np.uint8)
         padded_height = height + outer_gap + self.size - (height+outer_gap)%self.size
-        padded_width = width + outer_gap + self.size - (height+outer_gap)%self.size
+        padded_width = width + outer_gap + self.size - (width+outer_gap)%self.size
 
         padded_img_large = np.zeros((padded_height, padded_width, 3), dtype=np.uint8)
         padded_img_large[outer_gap:img.shape[0]+outer_gap, outer_gap:img.shape[1]+outer_gap, :] = img
@@ -1854,14 +2188,15 @@ class Trainer():
         """ calculate predictions for all images in test folder and save it to pdf
         """
 
-        # self.set_pdf_path_pred()
-
         self.load_model()
 
-        # self.test_dir = Path("C:\\Users\\faulhamm\\Documents\\Philipp\\Code\\cc-machine-learning\\test")
+        self.pred_output_dir = Path(self.exp_dir) / Path(self.test_dir).name
+        self.pred_output_dir.mkdir(parents=True, exist_ok=True)
+        print("Writing predictions to:", self.pred_output_dir)
+
         img_paths = [os.path.join(self.test_dir, x) for x in os.listdir(self.test_dir) if x.lower().endswith(".jpg")]
         number_imgs = len(img_paths)
-        # img_paths = random.sample(img_paths, 35)
+        n_ok, n_fail = 0, 0
         for n in range(len(img_paths)):
             img_name = Path(img_paths[n]).name
             print("{0} / {1} | {2}".format(n, number_imgs, img_paths[n]))
@@ -1875,11 +2210,18 @@ class Trainer():
                 else:
                     whole_mask = self.predict_whole_image(img)
                 self.save_mask(whole_mask, img_name)
+                n_ok += 1
             except Exception as e:
-                print("Error: ", e)
-                print("FILE: ", img_paths[n])
-                print("continue...")
+                n_fail += 1
+                print("Error on {0}: {1}".format(img_paths[n], e))
+                traceback.print_exc()
+                if n_ok == 0 and n_fail >= 3:
+                    raise RuntimeError(
+                        "First {0} images all failed during prediction; aborting.".format(n_fail)
+                    ) from e
                 continue
+
+        print("Predict done: {0} ok, {1} failed (out of {2})".format(n_ok, n_fail, number_imgs))
 
 def check_gpu_availability():
     if torch.cuda.is_available():
@@ -1911,9 +2253,15 @@ def parse_args():
     parser.add_argument('--num_workers', default=16, type=int, help='number of DataLoader worker processes for data loading; increase to reduce GPU idle time', required=False)
     parser.add_argument('--ignore_background', default=False, action=argparse.BooleanOptionalAction, help='exclude background class from training and mask it out of the loss/metric (default: False; the default path trains background as an explicit class and relies on focal loss to down-weight it)')
     parser.add_argument('--use_weighted_sampler', default=True, help='use weighted sampler to address class imbalance in training data', required=False)
-    parser.add_argument('--loss', default='focal', choices=['focal', 'dice_ce'], help='training loss: "focal" (default) or "dice_ce" (Dice + class-weighted CE, recommended for heavy class imbalance)', required=False)
+    parser.add_argument('--loss', default='focal', choices=['focal', 'dice_ce', 'tversky_ce'], help='training loss: "focal" (default), "dice_ce" (Dice + class-weighted CE), or "tversky_ce" (Tversky + class-weighted CE; tune alpha/beta to trade off FP vs FN on rare classes)', required=False)
     parser.add_argument('--class_weight_power', default=0.5, type=float, help='exponent p in CE class weight = 1/freq^p (dice_ce only). 0.5=sqrt (mild), 0.75=stronger rare-class push, 1.0=full inverse frequency (aggressive, can be unstable).', required=False)
     parser.add_argument('--bg_weight_multiplier', default=1.0, type=float, help='multiplies the background CE weight (dice_ce only). 1.0=default, 0.25=soft downweight, 0.0=hard ignore (also drops background from Dice).', required=False)
+    parser.add_argument('--save_confusion_each_epoch', default=False, action='store_true', help='save confusion matrix every epoch (default: only on improvement). Useful for offline per-class IoU analysis at every epoch.')
+    parser.add_argument('--tversky_alpha', default=0.3, type=float, help='Tversky FP weight (tversky_ce only). Lower alpha = less FP penalty.')
+    parser.add_argument('--tversky_beta', default=0.7, type=float, help='Tversky FN weight (tversky_ce only). Higher beta = more FN penalty → higher recall on rare classes. alpha=beta=0.5 reduces to Dice.')
+    parser.add_argument('--hard_sample_target', default=None, type=str, help='Enable hard sampling on this class (label name, e.g. "cyanosbark"). At end of each epoch, the per-tile FN rate for this class is EMA-smoothed and multiplied into the inv-freq tile weights so the next epoch oversamples tiles the model is currently failing on. Requires --use_weighted_sampler. Off by default.')
+    parser.add_argument('--hard_sample_strength', default=2.0, type=float, help='Hard-sampling weight multiplier: new_w = base_w * (1 + strength * hardness_ema). 0 disables boost (= baseline), 2.0 doubles weight for max-hardness tiles, larger pushes harder.')
+    parser.add_argument('--hard_sample_ema', default=0.7, type=float, help='EMA factor for per-tile hardness: hardness = ema*prev + (1-ema)*current. Higher = smoother (slow to react), lower = more reactive to current epoch.')
     args = parser.parse_args()
     return args
 
@@ -1950,6 +2298,12 @@ if __name__ == "__main__":
     loss_name = args.loss
     class_weight_power = args.class_weight_power
     bg_weight_multiplier = args.bg_weight_multiplier
+    save_confusion_each_epoch = args.save_confusion_each_epoch
+    tversky_alpha = args.tversky_alpha
+    tversky_beta = args.tversky_beta
+    hard_sample_target = args.hard_sample_target
+    hard_sample_strength = args.hard_sample_strength
+    hard_sample_ema = args.hard_sample_ema
 
     if data_leakage:
         print(" CAUTION: \n Data leakage is allowed in cross validation! \n Subimages from one original image might be placed in training and validation set.")
@@ -1978,6 +2332,12 @@ if __name__ == "__main__":
                           loss_name=loss_name,
                           class_weight_power=class_weight_power,
                           bg_weight_multiplier=bg_weight_multiplier,
+                          save_confusion_each_epoch=save_confusion_each_epoch,
+                          tversky_alpha=tversky_alpha,
+                          tversky_beta=tversky_beta,
+                          hard_sample_target=hard_sample_target,
+                          hard_sample_strength=hard_sample_strength,
+                          hard_sample_ema=hard_sample_ema,
                           )
         for encoder in encoder_list:
             trainer.set_encoder(encoder) # set encoder for model
