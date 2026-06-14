@@ -3,15 +3,43 @@
 Reads CSVs produced by cv_error_analysis.py and writes PNGs to the same summary folder.
 """
 
+import json
 from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-SUMMARY_DIR = Path(
-    r"C:\Users\faulhamm\Documents\Philipp\Code\cc-machine-learning\results\02-cc-gg\cross_val\summary"
-)
+cv_exp_num = "01"  # part of the CV_ROOT path; change to load a different run's results
+project = "gg"  # project name either "atto" or "gg"
+
+REPO_DIR = Path(__file__).resolve().parent
 METRICS = ["recall", "precision", "iou", "f1"]
+DEFAULT_COLOR = "#4C78A8"
+
+
+def configure(project_name: str, exp_num: str):
+    """Point the module at a different project / CV run (used by cv_complete_analysis)."""
+    global project, cv_exp_num, SUMMARY_DIR
+    project = project_name
+    cv_exp_num = exp_num
+    SUMMARY_DIR = Path(
+        r"C:\Users\faulhamm\Documents\Philipp\Code\cc-machine-learning\results\02-cc-{0}\cross_val_{1}\summary".format(project, cv_exp_num)
+    )
+
+
+configure(project, cv_exp_num)  # initialize module-level paths
+
+
+def load_class_colors() -> dict:
+    """Map class name -> hex color from ontology_{project}.json."""
+    with open(REPO_DIR / f"ontology_{project}.json") as f:
+        ontology = json.load(f)["ontology"]
+    return {name: entry["color"] for name, entry in ontology.items()}
+
+
+def colors_for(classes, class_colors: dict) -> list:
+    """Color per class in order, falling back to the default for unknown names."""
+    return [class_colors.get(cls, DEFAULT_COLOR) for cls in classes]
 
 
 def load():
@@ -22,14 +50,15 @@ def load():
     return per_class, per_fold, cm_mean, cm_std
 
 
-def plot_metric_bars(per_class: pd.DataFrame, metric: str, out_path: Path):
+def plot_metric_bars(per_class: pd.DataFrame, metric: str, out_path: Path,
+                     class_colors: dict):
     classes = per_class["class"].tolist()
     means = per_class[f"{metric}_mean"].to_numpy()
     stds = per_class[f"{metric}_std"].to_numpy()
 
     fig, ax = plt.subplots(figsize=(10, 5))
     x = np.arange(len(classes))
-    bars = ax.bar(x, means, yerr=stds, capsize=4, color="#4C78A8",
+    bars = ax.bar(x, means, yerr=stds, capsize=4, color=colors_for(classes, class_colors),
                   edgecolor="black", linewidth=0.5, error_kw={"elinewidth": 1.2})
     ax.set_xticks(x)
     ax.set_xticklabels(classes, rotation=30, ha="right")
@@ -45,7 +74,8 @@ def plot_metric_bars(per_class: pd.DataFrame, metric: str, out_path: Path):
     plt.close(fig)
 
 
-def plot_iou_with_folds(per_class: pd.DataFrame, per_fold: pd.DataFrame, out_path: Path):
+def plot_iou_with_folds(per_class: pd.DataFrame, per_fold: pd.DataFrame, out_path: Path,
+                        class_colors: dict):
     """IoU bars with individual fold values overlaid as dots."""
     classes = per_class["class"].tolist()
     means = per_class["iou_mean"].to_numpy()
@@ -54,7 +84,7 @@ def plot_iou_with_folds(per_class: pd.DataFrame, per_fold: pd.DataFrame, out_pat
 
     fig, ax = plt.subplots(figsize=(11, 5.5))
     x = np.arange(len(classes))
-    ax.bar(x, means, yerr=stds, capsize=4, color="#4C78A8", alpha=0.8,
+    ax.bar(x, means, yerr=stds, capsize=4, color=colors_for(classes, class_colors), alpha=0.8,
            edgecolor="black", linewidth=0.5, label="mean ± SD (5 folds)",
            error_kw={"elinewidth": 1.2})
 
@@ -79,14 +109,15 @@ def plot_iou_with_folds(per_class: pd.DataFrame, per_fold: pd.DataFrame, out_pat
     plt.close(fig)
 
 
-def plot_all_metrics_grid(per_class: pd.DataFrame, out_path: Path):
+def plot_all_metrics_grid(per_class: pd.DataFrame, out_path: Path, class_colors: dict):
     classes = per_class["class"].tolist()
     x = np.arange(len(classes))
+    bar_colors = colors_for(classes, class_colors)
     fig, axes = plt.subplots(2, 2, figsize=(14, 9), sharex=True)
     for ax, metric in zip(axes.flat, METRICS):
         means = per_class[f"{metric}_mean"].to_numpy()
         stds = per_class[f"{metric}_std"].to_numpy()
-        ax.bar(x, means, yerr=stds, capsize=3, color="#4C78A8",
+        ax.bar(x, means, yerr=stds, capsize=3, color=bar_colors,
                edgecolor="black", linewidth=0.4, error_kw={"elinewidth": 1.0})
         ax.set_title(metric.upper() if metric == "iou" else metric.capitalize())
         ax.set_ylim(0, 1.05)
@@ -132,12 +163,13 @@ def plot_confusion_heatmap(cm_mean: pd.DataFrame, cm_std: pd.DataFrame, out_path
 def main():
     np.random.seed(0)
     per_class, per_fold, cm_mean, cm_std = load()
+    class_colors = load_class_colors()
 
     for metric in METRICS:
-        plot_metric_bars(per_class, metric, SUMMARY_DIR / f"bars_{metric}.png")
+        plot_metric_bars(per_class, metric, SUMMARY_DIR / f"bars_{metric}.png", class_colors)
 
-    plot_iou_with_folds(per_class, per_fold, SUMMARY_DIR / "iou_with_folds.png")
-    plot_all_metrics_grid(per_class, SUMMARY_DIR / "all_metrics_grid.png")
+    plot_iou_with_folds(per_class, per_fold, SUMMARY_DIR / "iou_with_folds.png", class_colors)
+    plot_all_metrics_grid(per_class, SUMMARY_DIR / "all_metrics_grid.png", class_colors)
     plot_confusion_heatmap(cm_mean, cm_std, SUMMARY_DIR / "confusion_matrix_mean_std.png")
 
     print(f"Wrote plots to: {SUMMARY_DIR}")

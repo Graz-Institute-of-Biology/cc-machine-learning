@@ -12,8 +12,20 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-CV_ROOT = Path(r"C:\Users\faulhamm\Documents\Philipp\Code\cc-machine-learning\results\02-cc-gg\cross_val")
-OUT_DIR = CV_ROOT / "summary"
+cv_exp_num = "01"  # part of the CV_ROOT path; change to load a different run's results
+project = "gg"  # project name either "atto" or "gg"
+
+
+def configure(project_name: str, exp_num: str):
+    """Point the module at a different project / CV run (used by cv_complete_analysis)."""
+    global project, cv_exp_num, CV_ROOT, OUT_DIR
+    project = project_name
+    cv_exp_num = exp_num
+    CV_ROOT = Path(r"C:\Users\faulhamm\Documents\Philipp\Code\cc-machine-learning\results\02-cc-{0}\cross_val_{1}".format(project, cv_exp_num))
+    OUT_DIR = CV_ROOT / "summary"
+
+
+configure(project, cv_exp_num)  # initialize module-level paths
 
 
 def find_fold_dirs(root: Path):
