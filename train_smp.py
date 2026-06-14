@@ -31,12 +31,53 @@ import shutil
 import datetime
 
 
+def dataloader_worker_init(worker_id):
+    """Disable OpenCV's internal threading inside DataLoader workers.
+
+    Each worker otherwise spawns its own OpenCV thread pool (used by warpAffine
+    etc. in the augmentations), oversubscribing the cores allocated to the job —
+    notably on SLURM, where the cgroup only has the cores requested via
+    --cpus-per-task. One single-threaded OpenCV per worker parallelises cleanly
+    across workers instead. Does not affect results, only thread scheduling.
+    """
+    cv2.setNumThreads(0)
+
+
 class RecordingWeightedSampler(WeightedRandomSampler):
     """WeightedRandomSampler that records the drawn indices for post-epoch analysis."""
 
     def __iter__(self):
         self.last_indices = list(super().__iter__())
         return iter(self.last_indices)
+
+
+class ModelEMA:
+    """Exponential moving average of model weights.
+
+    Keeps a shadow copy updated after every optimizer step:
+        ema_w = decay * ema_w + (1 - decay) * model_w
+    Validation/selection and the saved best checkpoint use the EMA weights —
+    the averaged model is typically slightly better and much less noisy
+    epoch-to-epoch than the raw weights. Non-float buffers (e.g. BatchNorm
+    num_batches_tracked) are copied verbatim.
+    """
+
+    def __init__(self, model, decay=0.999):
+        import copy
+        self.decay = decay
+        self.module = copy.deepcopy(model).eval()
+        for p in self.module.parameters():
+            p.requires_grad_(False)
+
+    @torch.no_grad()
+    def update(self, model):
+        model_sd = model.state_dict()
+        for key, ema_val in self.module.state_dict().items():
+            model_val = model_sd[key].detach()
+            if ema_val.dtype.is_floating_point:
+                ema_val.mul_(self.decay).add_(model_val, alpha=1.0 - self.decay)
+            else:
+                ema_val.copy_(model_val)
 
 
 class FocalLossIgnoreBackground(torch.nn.Module):
@@ -121,13 +162,17 @@ class DiceCEWeighted(torch.nn.Module):
     __name__ = 'DiceCE_loss'
 
     def __init__(self, class_weights, dice_weight=0.5, ce_weight=0.5,
-                 ce_ignore_index=-100, dice_classes=None):
+                 ce_ignore_index=-100, dice_classes=None, label_smoothing=0.0):
         super().__init__()
         self._dice = smp.losses.DiceLoss(
             mode='multiclass', from_logits=True, classes=dice_classes
         )
+        # label_smoothing > 0 makes CE tolerant of mislabeled pixels (e.g. the
+        # cyanosbark<->cyanosmoss ground-truth ambiguity) by capping the target
+        # confidence; 0.0 = standard CE.
         self._ce = torch.nn.CrossEntropyLoss(
-            weight=class_weights, ignore_index=ce_ignore_index
+            weight=class_weights, ignore_index=ce_ignore_index,
+            label_smoothing=label_smoothing
         )
         self.dice_w = dice_weight
         self.ce_w = ce_weight
@@ -155,14 +200,15 @@ class TverskyCEWeighted(torch.nn.Module):
 
     def __init__(self, class_weights, tversky_weight=0.5, ce_weight=0.5,
                  alpha=0.3, beta=0.7,
-                 ce_ignore_index=-100, tversky_classes=None):
+                 ce_ignore_index=-100, tversky_classes=None, label_smoothing=0.0):
         super().__init__()
         self._tversky = smp.losses.TverskyLoss(
             mode='multiclass', from_logits=True, classes=tversky_classes,
             alpha=alpha, beta=beta,
         )
         self._ce = torch.nn.CrossEntropyLoss(
-            weight=class_weights, ignore_index=ce_ignore_index
+            weight=class_weights, ignore_index=ce_ignore_index,
+            label_smoothing=label_smoothing
         )
         self.t_w = tversky_weight
         self.ce_w = ce_weight
@@ -254,6 +300,16 @@ class Trainer():
                  hard_sample_target=None,
                  hard_sample_strength=2.0,
                  hard_sample_ema=0.7,
+                 lr=1e-4,
+                 decoder_lr_mult=1.0,
+                 lr_schedule='plateau',
+                 warmup_epochs=3,
+                 use_amp=False,
+                 grad_checkpoint=False,
+                 label_smoothing=0.0,
+                 ema_decay=0.0,
+                 aug_photometric=False,
+                 aug_scale_limit=0.1,
                  ):
 
         self.size = size
@@ -274,6 +330,15 @@ class Trainer():
         self.hard_sample_strength = hard_sample_strength
         self.hard_sample_ema = hard_sample_ema
         self.hard_sample_target_idx = None  # resolved in create_dataloaders
+        self.use_amp = use_amp
+        self.grad_checkpoint = grad_checkpoint
+        self.label_smoothing = label_smoothing
+        self.ema_decay = ema_decay
+        self.ema = None  # ModelEMA instance, created in prepare_model when ema_decay > 0
+        self.aug_photometric = aug_photometric
+        self.aug_scale_limit = aug_scale_limit
+        self.decoder_lr_mult = decoder_lr_mult
+        self.warmup_epochs = warmup_epochs
         self.config_file = config_file
         self.device = device
         self.epochs = epochs
@@ -310,10 +375,13 @@ class Trainer():
         self.activation = None
         self.optimizer_name = optimizer_name
         self.batch_size = batch_size
-        self.lr = 1e-4
+        self.lr = lr
         self.uncertainy_runs = 10
         self.weight_decay = 1e-4
-        self.lr_scheduler = "ReduceLROnPlateau"
+        # 'plateau' = legacy ReduceLROnPlateau on val IoU (default, reproduces
+        # all past runs). 'cosine' = linear warmup + cosine decay over the fixed
+        # epoch budget, the standard recipe for transformer (mit_*) encoders.
+        self.lr_scheduler = "ReduceLROnPlateau" if lr_schedule == 'plateau' else "WarmupCosine"
 
         self.preprocessing_fn = smp.encoders.get_preprocessing_fn(self.encoder, self.encoder_weights)
         self.preprocessing = get_preprocessing(self.preprocessing_fn)
@@ -526,7 +594,15 @@ class Trainer():
                 "activation": self.activation,
                 "weight_decay": self.weight_decay,
                 "scheduler": self.lr_scheduler,
+                "warmup_epochs": self.warmup_epochs,
+                "decoder_lr_mult": self.decoder_lr_mult,
                 "accumulation_steps": self.accumulation_steps,
+                "amp": self.use_amp,
+                "grad_checkpoint": self.grad_checkpoint,
+                "label_smoothing": self.label_smoothing,
+                "ema_decay": self.ema_decay,
+                "aug_photometric": self.aug_photometric,
+                "aug_scale_limit": self.aug_scale_limit,
                 
                 # Model architecture
                 "model": "Unet",
@@ -572,7 +648,10 @@ class Trainer():
 
         train_len = int(len(self.images_fps) * train_split)
 
-        indices = np.random.choice(np.arange(len(self.images_fps)), len(self.images_fps))
+        # permutation (without replacement) — np.random.choice's default
+        # replacement=True duplicated tiles in train AND leaked tiles into both
+        # train and val at the same time.
+        indices = np.random.permutation(len(self.images_fps))
         train_indices = indices[:train_len]
         val_indices = indices[train_len:]
 
@@ -785,11 +864,17 @@ class Trainer():
         try:
             os.makedirs(snap_dir, exist_ok=True)
 
-            # 1. The training script actually being executed.
-            try:
-                shutil.copy2(os.path.abspath(__file__), snap_dir)
-            except Exception as e:
-                print(f"[snapshot] could not copy training script: {e}")
+            # 1. The training script and its local helper modules. The helpers
+            # define the augmentation pipeline and dataset loading, so they are
+            # part of what makes a run reproducible.
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            for src in [os.path.abspath(__file__),
+                        os.path.join(script_dir, "training_helper.py"),
+                        os.path.join(script_dir, "smp_dataset.py")]:
+                try:
+                    shutil.copy2(src, snap_dir)
+                except Exception as e:
+                    print(f"[snapshot] could not copy {src}: {e}")
 
             # 2. Config YAML and ontology JSON (relative to cwd or absolute).
             for src in [getattr(self, "config_file", None),
@@ -825,6 +910,14 @@ class Trainer():
                 "hard_sample_target": self.hard_sample_target,
                 "hard_sample_strength": self.hard_sample_strength,
                 "hard_sample_ema": self.hard_sample_ema,
+                "decoder_lr_mult": self.decoder_lr_mult,
+                "warmup_epochs": self.warmup_epochs,
+                "use_amp": self.use_amp,
+                "grad_checkpoint": self.grad_checkpoint,
+                "label_smoothing": self.label_smoothing,
+                "ema_decay": self.ema_decay,
+                "aug_photometric": self.aug_photometric,
+                "aug_scale_limit": self.aug_scale_limit,
                 "ignore_background": self.ignore_background,
                 "use_weighted_sampler": self.use_weighted_sampler,
                 "memory_optimized": self.memory_optimized,
@@ -987,7 +1080,11 @@ class Trainer():
             augmentations (bool, optional): use/dont use augmentations. Defaults to True.
         """
         if augmentations:
-            training_augmentation = get_training_augmentation(min_height=1024, min_width=1024)
+            training_augmentation = get_training_augmentation(
+                min_height=1024, min_width=1024,
+                photometric=self.aug_photometric,
+                scale_limit=self.aug_scale_limit,
+            )
             validation_augmentation = get_validation_augmentation(min_height=1024, min_width=1024)
         else:
             training_augmentation = None
@@ -1009,7 +1106,8 @@ class Trainer():
             preprocessing=get_preprocessing(self.preprocessing_fn),
         )
 
-        loader_kwargs = dict(pin_memory=True, prefetch_factor=4, persistent_workers=True) if self.num_workers > 0 else {}
+        loader_kwargs = dict(pin_memory=True, prefetch_factor=4, persistent_workers=True,
+                             worker_init_fn=dataloader_worker_init) if self.num_workers > 0 else {}
 
         if self.use_weighted_sampler:
             sampler = RecordingWeightedSampler(
@@ -1082,6 +1180,47 @@ class Trainer():
 
 
 
+    def enable_mit_gradient_checkpointing(self):
+        """Checkpoint every transformer block in the MiT encoder.
+
+        The previous implementation patched encoder.block1..4.forward, but
+        smp's MixVisionTransformer.forward_features iterates those ModuleLists
+        directly (`for blk in self.block1: x = blk(x, H, W)`) and never calls
+        ModuleList.forward — so it silently did nothing, which is why
+        --memory_optimized never allowed a larger batch (slurm-5191111.out:
+        identical 38.7GB OOM with and without it). Patching each block's own
+        forward actually intercepts the calls.
+
+        Memory effect: only block-boundary activations are kept; the attention
+        matrices (the dominant tensors at 1024², kept fp32 by autocast) are
+        recomputed during backward. With use_reentrant=False the recompute
+        replays under the ambient autocast state, so it composes with --amp,
+        and non-tensor args (H, W) are supported. The torch.is_grad_enabled()
+        guard skips checkpointing overhead during no_grad validation/inference.
+        """
+        from torch.utils.checkpoint import checkpoint
+
+        n_wrapped = 0
+        for block_name in ['block1', 'block2', 'block3', 'block4']:
+            block_list = getattr(self.model.encoder, block_name, None)
+            if block_list is None:
+                continue
+            for blk in block_list:
+                orig_fwd = blk.forward
+
+                def make_ckpt_forward(fwd):
+                    def ckpt_forward(x, H, W):
+                        if torch.is_grad_enabled():
+                            return checkpoint(fwd, x, H, W, use_reentrant=False)
+                        return fwd(x, H, W)
+                    return ckpt_forward
+
+                blk.forward = make_ckpt_forward(orig_fwd)
+                n_wrapped += 1
+
+        print(f"Gradient checkpointing enabled for MiT encoder "
+              f"({n_wrapped} transformer blocks wrapped)")
+
     def prepare_model(self):
         """Prepare model for loading (training or testing/predicting).
         Set loss, metrics, optimizer and training / validation runners.
@@ -1101,30 +1240,6 @@ class Trainer():
         # self.dice_loss.__name__ = 'Dice_loss'
         # self.loss = self.dice_loss
 
-        if self.memory_optimized and 'mit_' in self.encoder:
-            from torch.utils.checkpoint import checkpoint
-            
-            encoder = self.model.encoder
-            
-            # Wrap each block's forward to use checkpointing
-            for block_name in ['block1', 'block2', 'block3', 'block4']:
-                block = getattr(encoder, block_name, None)
-                if block is not None:
-                    original_forward = block.forward
-                    
-                    def make_checkpointed_forward(orig_fwd):
-                        def checkpointed_forward(x):
-                            # Checkpoint each sub-block in the Sequential
-                            for sub_block in orig_fwd.__self__:
-                                x = checkpoint(sub_block, x, use_reentrant=False)
-                            return x
-                        return checkpointed_forward
-                    
-                    block.forward = make_checkpointed_forward(original_forward)
-            
-            print("Gradient checkpointing enabled for MiT encoder")
-
-        
         if self.pred:
             # Inference path: no loss/optimizer/scheduler/epoch runners needed.
             # Skips the dice_ce branch's dependency on self.train_class_counts,
@@ -1173,6 +1288,7 @@ class Trainer():
                 class_weights=class_weights_t,
                 ce_ignore_index=ce_ignore_index,
                 dice_classes=dice_classes,
+                label_smoothing=self.label_smoothing,
             )
         elif self.loss_name == 'tversky_ce':
             # Same class-weight + bg handling as dice_ce; only the segment-level
@@ -1207,32 +1323,84 @@ class Trainer():
                 beta=self.tversky_beta,
                 ce_ignore_index=ce_ignore_index,
                 tversky_classes=tversky_classes,
+                label_smoothing=self.label_smoothing,
             )
         else:
             raise ValueError(f"Unknown loss_name: {self.loss_name}")
 
 
-        if self.optimizer_name == "Adam":
-            self.optimizer = torch.optim.Adam([ 
-            dict(params=self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay),
-            ])
+        if self.optimizer_name == "AdamW":
+            # Transformer-encoder recipe: decoupled weight decay, no decay on
+            # biases/norm params (1-d tensors), and an optionally higher LR for
+            # the randomly-initialised decoder vs the pretrained encoder.
+            param_groups = []
+            for prefix, lr in [("encoder.", self.lr),
+                               ("", self.lr * self.decoder_lr_mult)]:
+                decay_params, no_decay_params = [], []
+                for name, p in self.model.named_parameters():
+                    if not p.requires_grad:
+                        continue
+                    is_encoder = name.startswith("encoder.")
+                    if (prefix == "encoder.") != is_encoder:
+                        continue
+                    (no_decay_params if p.ndim <= 1 else decay_params).append(p)
+                if decay_params:
+                    param_groups.append(dict(params=decay_params, lr=lr,
+                                             weight_decay=self.weight_decay))
+                if no_decay_params:
+                    param_groups.append(dict(params=no_decay_params, lr=lr,
+                                             weight_decay=0.0))
+            self.optimizer = torch.optim.AdamW(param_groups)
+            print(f"AdamW: encoder lr={self.lr}, decoder lr={self.lr * self.decoder_lr_mult}, "
+                  f"wd={self.weight_decay} (none on biases/norms)")
         elif self.optimizer_name == "SGD":
-            self.optimizer = torch.optim.SGD([ 
+            self.optimizer = torch.optim.SGD([
             dict(params=self.model.parameters(), lr=self.lr),
             ])
         else:
-            self.optimizer = torch.optim.Adam([ 
+            self.optimizer = torch.optim.Adam([
             dict(params=self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay),
             ])
 
         if self.lr_scheduler == "ReduceLROnPlateau":
             self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                self.optimizer, 
+                self.optimizer,
                 mode='max',           # Maximize validation IoU
                 factor=0.5,           # Cut LR in half
                 patience=10,          # Wait 10 epochs before reducing
                 verbose=True
             )
+        elif self.lr_scheduler == "WarmupCosine":
+            # Linear warmup then cosine decay over the fixed epoch budget;
+            # stepped once per epoch. The multiplier applies per param group,
+            # so encoder/decoder differential LRs are preserved.
+            warmup = max(0, self.warmup_epochs)
+
+            def lr_lambda(epoch):
+                if epoch < warmup:
+                    return (epoch + 1) / warmup
+                progress = (epoch - warmup) / max(1, self.epochs - warmup)
+                return 0.5 * (1.0 + np.cos(np.pi * min(progress, 1.0)))
+
+            self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda)
+            print(f"WarmupCosine schedule: {warmup} warmup epochs, "
+                  f"cosine decay over {self.epochs} epochs")
+
+        # EMA shadow model: validation, model selection and the saved best
+        # checkpoint all use the averaged weights when enabled.
+        if self.ema_decay > 0:
+            if self.accumulation_steps == 0:
+                raise ValueError("--ema_decay requires the gradient-accumulation "
+                                 "training loop (accumulation_steps > 0).")
+            self.ema = ModelEMA(self.model, decay=self.ema_decay)
+            print(f"Model EMA enabled: decay={self.ema_decay}")
+
+        # Gradient checkpointing — must come AFTER the EMA deepcopy: the patch
+        # installs per-block forward closures bound to this model's blocks, and
+        # deepcopy copies function attributes by reference, so a copy made
+        # after patching would silently run the original model's weights.
+        if (self.memory_optimized or self.grad_checkpoint) and 'mit_' in self.encoder:
+            self.enable_mit_gradient_checkpointing()
 
         # create epoch runners 
         # it is a simple loop of iterating over dataloader`s samples
@@ -1261,8 +1429,12 @@ class Trainer():
         train/valid dataloaders seem to need a lot of memory and are not saved in the model
         """
         old_ontology_dict = {class_name: data["color"] for class_name, data in self.ontology["ontology"].items()}
+        # With EMA, the averaged weights are what was validated/selected, so
+        # they are what gets checkpointed.
+        model_for_ckpt = self.ema.module if self.ema is not None else self.model
         ckpt_dict = {
-            'model_state_dict': self.model.state_dict(),
+            'model_state_dict': model_for_ckpt.state_dict(),
+            'ema': self.ema is not None,
             'optimizer_state_dict': self.optimizer.state_dict(),
             # 'train_dl': self.train_loader,
             # 'valid_dl': self.valid_loader,
@@ -1328,7 +1500,10 @@ class Trainer():
                 self.save_confusion_matrix(epoch=epoch)
 
             self.train_log_df.loc[epoch] = [self.train_logs[self.loss.__name__], self.train_logs['iou_score']]
-            self.valid_log_df.loc[epoch] = [self.valid_logs[self.loss.__name__], self.valid_logs['iou_score']]
+            # valid_log_df has an iou_corpus_fg column (filled by the
+            # accumulation loop); this loop doesn't compute it, so pad with NaN
+            # to keep the row width consistent.
+            self.valid_log_df.loc[epoch] = [self.valid_logs[self.loss.__name__], self.valid_logs['iou_score'], np.nan]
 
             self.train_log_df.to_csv(os.path.join(self.exp_dir, "train_log.csv"))
             self.valid_log_df.to_csv(os.path.join(self.exp_dir, "valid_log.csv"))
@@ -1361,7 +1536,10 @@ class Trainer():
                 wandb_log["val/iou_background"] = self.valid_logs['iou_background']
             wandb.log(wandb_log)
 
-            self.scheduler.step(self.valid_logs['iou_score'])
+            if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                self.scheduler.step(self.valid_logs['iou_score'])
+            else:
+                self.scheduler.step()
 
 
 
@@ -1403,8 +1581,13 @@ class Trainer():
             for batch_idx, (x, y) in enumerate(pbar):
                 x, y = x.to(self.device), y.to(self.device)
 
-                pred = self.model(x)
-                loss = self.loss(pred, y)
+                # bf16 autocast: ~halves activation memory and speeds up matmuls
+                # on Ampere+ GPUs with no loss-scaling needed (bf16 has fp32's
+                # exponent range). Params/grads stay fp32. No-op when disabled.
+                with torch.autocast(device_type='cuda', dtype=torch.bfloat16,
+                                    enabled=self.use_amp):
+                    pred = self.model(x)
+                    loss = self.loss(pred, y)
                 (loss / self.accumulation_steps).backward()
 
                 train_loss_sum += loss.item()
@@ -1441,6 +1624,8 @@ class Trainer():
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                     self.optimizer.step()
                     self.optimizer.zero_grad()
+                    if self.ema is not None:
+                        self.ema.update(self.model)
 
             # === HARD SAMPLING UPDATE ===
             # End-of-epoch: blend this epoch's per-tile FN rate into the EMA
@@ -1474,7 +1659,11 @@ class Trainer():
                       f"max_mult={hs_stats['hardsample/max_weight_multiplier']:.2f}")
 
             # === VALIDATION ===
+            # With EMA enabled, validation/selection runs on the averaged
+            # weights — the same weights that get saved as best_model.pth.
+            eval_model = self.ema.module if self.ema is not None else self.model
             self.model.eval()
+            eval_model.eval()
             val_loss_sum = 0
             val_metric_sums = {m.__name__: 0.0 for m in self.metrics}
             # Corpus-wide per-class IoU: accumulate TP/FP/FN across the full
@@ -1489,8 +1678,10 @@ class Trainer():
             with torch.no_grad():
                 for x, y in tqdm(self.valid_loader, desc='valid'):
                     x, y = x.to(self.device), y.to(self.device)
-                    pred = self.model(x)
-                    loss = self.loss(pred, y)
+                    with torch.autocast(device_type='cuda', dtype=torch.bfloat16,
+                                        enabled=self.use_amp):
+                        pred = eval_model(x)
+                        loss = self.loss(pred, y)
                     val_loss_sum += loss.item()
                     for m in self.metrics:
                         val_metric_sums[m.__name__] += m(pred, y).item()
@@ -1545,14 +1736,19 @@ class Trainer():
             self.train_log_df.to_csv(os.path.join(self.exp_dir, "train_log.csv"))
             self.valid_log_df.to_csv(os.path.join(self.exp_dir, "valid_log.csv"))
 
-            self.scheduler.step(val_iou_corpus_fg)
+            if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                self.scheduler.step(val_iou_corpus_fg)
+            else:
+                self.scheduler.step()
 
-            sampled_counts = self.train_patch_counts[self.sampler.last_indices].sum(axis=0)
-            sampled_total = sampled_counts.sum()
-            sampled_dist = {
-                f"sampled_dist/{label}": sampled_counts[i] / sampled_total if sampled_total > 0 else 0
-                for i, label in enumerate(self.labels)
-            }
+            sampled_dist = {}
+            if self.sampler is not None:
+                sampled_counts = self.train_patch_counts[self.sampler.last_indices].sum(axis=0)
+                sampled_total = sampled_counts.sum()
+                sampled_dist = {
+                    f"sampled_dist/{label}": sampled_counts[i] / sampled_total if sampled_total > 0 else 0
+                    for i, label in enumerate(self.labels)
+                }
 
             per_class_iou_log = {
                 f"val/iou_{label}": float(per_class_iou[i])
@@ -1597,13 +1793,16 @@ class Trainer():
         self.valid_log_df = pd.DataFrame(columns=[self.loss.__name__, 'iou_score', 'iou_corpus_fg'])
 
 
-        if self.memory_optimized:
-            self.run_optimized_train_loop(al_step=al_step)
+        # memory_optimized's gradient checkpointing is applied in prepare_model;
+        # training itself uses the standard accumulation loop (the old separate
+        # run_optimized_train_loop no longer exists after the dev-file merge).
+        if self.accumulation_steps == 0:
+            if self.use_amp:
+                raise ValueError("--amp requires the gradient-accumulation "
+                                 "training loop (accumulation_steps > 0).")
+            self.run_train_loop()
         else:
-            if self.accumulation_steps == 0:
-                self.run_train_loop()
-            else:
-                self.run_train_loop_with_accumulation(early_stopping_patience=early_stopping_patience)
+            self.run_train_loop_with_accumulation(early_stopping_patience=early_stopping_patience)
         self.save_loss_plots()
 
 
@@ -2019,11 +2218,15 @@ class Trainer():
 
     def get_model_output(self, img):
         x_tensor = torch.from_numpy(img).to(self.device).unsqueeze(0)
-        self.model.eval()
+        # With EMA, all offline evaluation (confusion matrix, prediction,
+        # entropy) uses the averaged weights — consistent with what was
+        # validated and checkpointed.
+        model = self.ema.module if getattr(self, 'ema', None) is not None else self.model
+        model.eval()
         # model returns logits (activation=None); apply softmax here so
         # downstream code (.round(), entropy) sees probabilities.
         with torch.no_grad():
-            pr_mask = torch.softmax(self.model(x_tensor), dim=1)
+            pr_mask = torch.softmax(model(x_tensor), dim=1)
 
         return pr_mask
 
@@ -2252,7 +2455,7 @@ def parse_args():
     parser.add_argument('--early_stopping_patience', default=0, type=int, help='stop training if val IoU does not improve for this many epochs; 0 disables early stopping', required=False)
     parser.add_argument('--num_workers', default=16, type=int, help='number of DataLoader worker processes for data loading; increase to reduce GPU idle time', required=False)
     parser.add_argument('--ignore_background', default=False, action=argparse.BooleanOptionalAction, help='exclude background class from training and mask it out of the loss/metric (default: False; the default path trains background as an explicit class and relies on focal loss to down-weight it)')
-    parser.add_argument('--use_weighted_sampler', default=True, help='use weighted sampler to address class imbalance in training data', required=False)
+    parser.add_argument('--use_weighted_sampler', default=True, action=argparse.BooleanOptionalAction, help='use weighted sampler to address class imbalance in training data (disable with --no-use_weighted_sampler; the old "--use_weighted_sampler False" silently parsed as the truthy string "False")')
     parser.add_argument('--loss', default='focal', choices=['focal', 'dice_ce', 'tversky_ce'], help='training loss: "focal" (default), "dice_ce" (Dice + class-weighted CE), or "tversky_ce" (Tversky + class-weighted CE; tune alpha/beta to trade off FP vs FN on rare classes)', required=False)
     parser.add_argument('--class_weight_power', default=0.5, type=float, help='exponent p in CE class weight = 1/freq^p (dice_ce only). 0.5=sqrt (mild), 0.75=stronger rare-class push, 1.0=full inverse frequency (aggressive, can be unstable).', required=False)
     parser.add_argument('--bg_weight_multiplier', default=1.0, type=float, help='multiplies the background CE weight (dice_ce only). 1.0=default, 0.25=soft downweight, 0.0=hard ignore (also drops background from Dice).', required=False)
@@ -2262,6 +2465,19 @@ def parse_args():
     parser.add_argument('--hard_sample_target', default=None, type=str, help='Enable hard sampling on this class (label name, e.g. "cyanosbark"). At end of each epoch, the per-tile FN rate for this class is EMA-smoothed and multiplied into the inv-freq tile weights so the next epoch oversamples tiles the model is currently failing on. Requires --use_weighted_sampler. Off by default.')
     parser.add_argument('--hard_sample_strength', default=2.0, type=float, help='Hard-sampling weight multiplier: new_w = base_w * (1 + strength * hardness_ema). 0 disables boost (= baseline), 2.0 doubles weight for max-hardness tiles, larger pushes harder.')
     parser.add_argument('--hard_sample_ema', default=0.7, type=float, help='EMA factor for per-tile hardness: hardness = ema*prev + (1-ema)*current. Higher = smoother (slow to react), lower = more reactive to current epoch.')
+    # --- Optimizer / schedule / regularization (defaults reproduce legacy behavior) ---
+    parser.add_argument('--optimizer', default='adam', choices=['adam', 'adamw', 'sgd'], help='"adam" (legacy default, coupled L2 decay) or "adamw" (decoupled decay, no decay on biases/norms, supports --decoder_lr_mult; recommended for mit_* encoders).')
+    parser.add_argument('--lr', default=1e-4, type=float, help='base (encoder) learning rate. Legacy default 1e-4; for adamw + mit_b5 try 6e-5.')
+    parser.add_argument('--decoder_lr_mult', default=1.0, type=float, help='decoder/head LR = lr * this (adamw only). The randomly-initialised decoder tolerates a higher LR than the pretrained encoder; try 10.')
+    parser.add_argument('--lr_schedule', default='plateau', choices=['plateau', 'cosine'], help='"plateau" (legacy ReduceLROnPlateau on val IoU) or "cosine" (linear warmup + cosine decay over --epochs; uses the budget better for short runs).')
+    parser.add_argument('--warmup_epochs', default=3, type=int, help='linear warmup epochs before cosine decay (cosine schedule only).')
+    parser.add_argument('--amp', default=False, action='store_true', help='bf16 autocast mixed precision (Ampere+ GPUs): ~2x speed and ~half activation memory, enabling a larger physical batch (better BatchNorm statistics). Off by default.')
+    parser.add_argument('--grad_checkpoint', default=False, action='store_true', help='gradient checkpointing for mit_* encoders WITHOUT the num_workers=0 side effect of --memory_optimized. Required for batch_size >= 4 at 1024^2 on a 40GB A100: attention softmax stays fp32 under autocast, so --amp alone does not fit batch 4. ~30%% slower per step, roughly offset by --amp.')
+    parser.add_argument('--label_smoothing', default=0.0, type=float, help='CE label smoothing (dice_ce/tversky_ce). 0.05-0.1 makes CE tolerant of mislabeled pixels (e.g. cyanosbark/cyanosmoss ambiguity). 0 = legacy behavior.')
+    parser.add_argument('--ema_decay', default=0.0, type=float, help='exponential moving average of model weights, updated each optimizer step (try 0.999). Validation, selection and best_model.pth use the EMA weights. 0 = off (legacy).')
+    # --- Augmentation (defaults reproduce the long-standing hardcoded pipeline) ---
+    parser.add_argument('--aug_photometric', default=False, action='store_true', help='add mild brightness/contrast + gentle hue/sat jitter to training augmentation. Off by default (legacy pipeline was geometry-only).')
+    parser.add_argument('--aug_scale_limit', default=0.1, type=float, help='ShiftScaleRotate scale_limit in training augmentation (legacy default 0.1; try 0.25 for more scale variety).')
     args = parser.parse_args()
     return args
 
@@ -2304,6 +2520,7 @@ if __name__ == "__main__":
     hard_sample_target = args.hard_sample_target
     hard_sample_strength = args.hard_sample_strength
     hard_sample_ema = args.hard_sample_ema
+    optimizer_name = {'adam': 'Adam', 'adamw': 'AdamW', 'sgd': 'SGD'}[args.optimizer]
 
     if data_leakage:
         print(" CAUTION: \n Data leakage is allowed in cross validation! \n Subimages from one original image might be placed in training and validation set.")
@@ -2338,6 +2555,17 @@ if __name__ == "__main__":
                           hard_sample_target=hard_sample_target,
                           hard_sample_strength=hard_sample_strength,
                           hard_sample_ema=hard_sample_ema,
+                          optimizer_name=optimizer_name,
+                          lr=args.lr,
+                          decoder_lr_mult=args.decoder_lr_mult,
+                          lr_schedule=args.lr_schedule,
+                          warmup_epochs=args.warmup_epochs,
+                          use_amp=args.amp,
+                          grad_checkpoint=args.grad_checkpoint,
+                          label_smoothing=args.label_smoothing,
+                          ema_decay=args.ema_decay,
+                          aug_photometric=args.aug_photometric,
+                          aug_scale_limit=args.aug_scale_limit,
                           )
         for encoder in encoder_list:
             trainer.set_encoder(encoder) # set encoder for model
