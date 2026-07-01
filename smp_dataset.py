@@ -60,8 +60,10 @@ class Dataset(BaseDataset):
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         mask = cv2.imread(self.masks_fps[i], 0)
         
-        # extract certain classes from mask (e.g. cars)
-        masks = [(mask == v) for v in self.class_values]
+        # extract certain classes from mask (e.g. cars). np.isin handles both a
+        # scalar class value and a list of values (merged classes, e.g. atto's
+        # "cyanos" = [3,4,7]), collapsing the group into one channel.
+        masks = [np.isin(mask, v) for v in self.class_values]
         mask = np.stack(masks, axis=-1).astype('float')
         
         # apply augmentations

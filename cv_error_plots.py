@@ -17,13 +17,17 @@ METRICS = ["recall", "precision", "iou", "f1"]
 DEFAULT_COLOR = "#4C78A8"
 
 
-def configure(project_name: str, exp_num: str):
-    """Point the module at a different project / CV run (used by cv_complete_analysis)."""
+def configure(project_name: str, exp_num: str, summary_name: str = "summary"):
+    """Point the module at a different project / CV run (used by cv_complete_analysis).
+
+    `summary_name` selects the output subfolder — e.g. "summary_merged" to plot the
+    post-hoc merged-class CSVs written by cv_merge_classes.py.
+    """
     global project, cv_exp_num, SUMMARY_DIR
     project = project_name
     cv_exp_num = exp_num
     SUMMARY_DIR = Path(
-        r"C:\Users\faulhamm\Documents\Philipp\Code\cc-machine-learning\results\{0}\cross_val_{1}\summary".format(project, cv_exp_num)
+        r"C:\Users\faulhamm\Documents\Philipp\Code\cc-machine-learning\results\{0}\cross_val_{1}\{2}".format(project, cv_exp_num, summary_name)
     )
 
 

@@ -1,0 +1,10 @@
+{
+    "ontology": {
+        "background": {"value": 0, "color": "#000000"},
+        "liverwort": {"value": 1, "color": "#1cffbb"},
+        "moss": {"value": 2, "color": "#00bcff"},
+        "cyanos": {"value": [3, 4, 7], "color": "#0059ff"},
+        "lichen": {"value": 5, "color": "#ff00c3"},
+        "barkdominated": {"value": 6, "color": "#Ff0000"}
+    }
+ }

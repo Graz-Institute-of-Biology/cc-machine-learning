@@ -310,6 +310,7 @@ class Trainer():
                  ema_decay=0.0,
                  aug_photometric=False,
                  aug_scale_limit=0.1,
+                 merge_cyanos=False,
                  ):
 
         self.size = size
@@ -353,9 +354,23 @@ class Trainer():
         self.num_workers = 0 if self.memory_optimized else num_workers
 
         
+        self.merge_cyanos = merge_cyanos
+
         if load_config:
             self.ontology_file_name = None
             self.load_config()
+            # --merge_cyanos swaps in a 6-class ontology whose "cyanos" entry has a
+            # list value [3,4,7]; the three cyano* classes are then folded into one
+            # channel at one-hot construction (np.isin), so the model, losses,
+            # metrics and saved confusion matrices are all 6-class. Raw masks are
+            # untouched; atto-only because the group is defined against atto values.
+            if self.merge_cyanos:
+                if self.ontology_name != "atto":
+                    raise ValueError(
+                        "--merge_cyanos is only supported for the atto project "
+                        f"(got ontology '{self.ontology_name}')"
+                    )
+                self.ontology_file_name = "ontology_atto_cyanos_merged.json"
             self.load_ontology()
             if self.ignore_background:
                 self.class_values = [d["value"] for d in self.ontology["ontology"].values() if d["value"] != 0]
@@ -363,6 +378,13 @@ class Trainer():
             else:
                 self.class_values = [d["value"] for d in self.ontology["ontology"].values()]
                 self.labels = list(self.ontology["ontology"].keys())
+
+            # A merged class (e.g. atto "cyanos") has a *list* value like [3,4,7],
+            # which is unhashable and can't index a paletted/2D mask. class_repr is
+            # a single scalar pixel value per class (first member of a group) used
+            # wherever the confusion matrix / 2D masks / prediction output need one
+            # hashable value per channel. For non-merged runs it equals class_values.
+            self.class_repr = [v[0] if isinstance(v, list) else v for v in self.class_values]
 
         # model settings
         self.encoder = encoder
@@ -692,7 +714,7 @@ class Trainer():
                 continue
             img_idx = img_to_idx[stem]
             for cls_idx, cls_val in enumerate(self.class_values):
-                if np.any(mask == cls_val):
+                if np.any(np.isin(mask, cls_val)):
                     presence[img_idx, cls_idx] = 1.0
 
         print(f"{'Class':<20} {'Images with class':>18} {'%':>6}")
@@ -918,6 +940,7 @@ class Trainer():
                 "ema_decay": self.ema_decay,
                 "aug_photometric": self.aug_photometric,
                 "aug_scale_limit": self.aug_scale_limit,
+                "merge_cyanos": self.merge_cyanos,
                 "ignore_background": self.ignore_background,
                 "use_weighted_sampler": self.use_weighted_sampler,
                 "memory_optimized": self.memory_optimized,
@@ -1031,7 +1054,7 @@ class Trainer():
             mask = cv2.imread(mask_path, cv2.IMREAD_UNCHANGED)
             patch_counts = np.zeros(len(self.class_values))
             for idx, class_val in enumerate(self.class_values):
-                count = np.sum(mask == class_val)
+                count = np.sum(np.isin(mask, class_val))
                 train_class_counts[idx] += count
                 patch_counts[idx] = count
             train_patch_counts.append(patch_counts)
@@ -1056,7 +1079,7 @@ class Trainer():
         for mask_path in self.y_valid:
             mask = cv2.imread(mask_path, cv2.IMREAD_UNCHANGED)
             for idx, class_val in enumerate(self.class_values):
-                val_class_counts[idx] += np.sum(mask == class_val)
+                val_class_counts[idx] += np.sum(np.isin(mask, class_val))
         
         # Calculate percentages
         train_total = train_class_counts.sum()
@@ -1828,13 +1851,15 @@ class Trainer():
         """
         n_cls = len(self.class_values)
         cf_matrix = np.zeros((n_cls, n_cls), dtype=np.int64)
-        val_to_label = {v: self.labels[i] for i, v in enumerate(self.class_values)}
+        # class_repr (scalar per class) — class_values may contain a list for a
+        # merged class, which is unhashable and can't be a sklearn label.
+        val_to_label = {v: self.labels[i] for i, v in enumerate(self.class_repr)}
         # Full ordered label list — passing this to sklearn.confusion_matrix
         # ensures every off-diagonal cell is counted, even confusions into
         # classes not present in this tile's ground truth. Previous code
         # filtered by labels-present-in-y_true, which silently dropped FPs
         # into absent classes and inflated per-class precision.
-        all_labels = list(self.class_values)
+        all_labels = list(self.class_repr)
 
         tile_records = [] if tile_top_per_pair > 0 else None
 
@@ -1952,7 +1977,7 @@ class Trainer():
         # for v in self.class_values:
             # out[mask[:,:,v] == 1] = v
 
-        for channel_idx, class_val in enumerate(self.class_values): # consider removed background
+        for channel_idx, class_val in enumerate(self.class_repr): # consider removed background
             out[mask[:, :, channel_idx] == 1] = class_val
         mask = out
         unique_values = np.unique(mask)
@@ -1977,7 +2002,19 @@ class Trainer():
 
         col = ListedColormap(colors_hex)
         bounds = np.arange(len(colors_hex)+1)
-        norm = BoundaryNorm(bounds, col.N)  
+        norm = BoundaryNorm(bounds, col.N)
+
+        # get_2d_image returns class_repr pixel values, which are non-contiguous
+        # when a class is merged (atto "cyanos" leaves gaps at 4 and 7). The
+        # colormap and legend are indexed by *ontology position*, so remap pixel
+        # value -> position via a small LUT. For a contiguous ontology this is the
+        # identity, so existing (non-merged) PDFs are unchanged.
+        ont_keys = list(self.ontology["ontology"].keys())
+        ont_values = [v[0] if isinstance(v, list) else v
+                      for v in (e["value"] for e in self.ontology["ontology"].values())]
+        val_to_pos = np.zeros(max(ont_values) + 1, dtype=np.int64)
+        for pos, v in enumerate(ont_values):
+            val_to_pos[v] = pos
 
         fig = plt.figure(figsize=(16, 10))
 
@@ -1993,17 +2030,18 @@ class Trainer():
             if not name == 'image':
                 image, unique_values = self.get_2d_image(image)
 
-                plt.imshow(image, cmap=col, interpolation='nearest', norm=norm)
-                # plot only unique class values in legend
+                # Remap pixel values -> contiguous ontology positions so colormap
+                # and legend line up even for a merged (gappy) value set.
+                disp = val_to_pos[image]
+                plt.imshow(disp, cmap=col, interpolation='nearest', norm=norm)
+                # plot only unique classes present, indexed by ontology position.
+                positions = sorted({int(val_to_pos[v]) for v in unique_values})
                 if self.ignore_background:
-                    # labels has no background entry, so pixel value i maps to labels[i-1]; skip background pixels (i=0)
-                    patches = [mpatches.Patch(color=colors_hex[i], label=self.labels[i - 1]) for i in unique_values if i > 0]
-                else:
-                    # labels includes background at index 0, so pixel value i maps directly to labels[i]
-                    patches = [mpatches.Patch(color=colors_hex[i], label=self.labels[i]) for i in unique_values]
+                    positions = [p for p in positions if p > 0]  # background shown but not legended
+                patches = [mpatches.Patch(color=colors_hex[p], label=ont_keys[p]) for p in positions]
 
                 plt.axis('off')
-                plt.legend(handles=patches, bbox_to_anchor=(1.05, 1), loc=0, borderaxespad=0. )   
+                plt.legend(handles=patches, bbox_to_anchor=(1.05, 1), loc=0, borderaxespad=0. )
             else:
                 plt.imshow(image)
         # plt.show()
@@ -2254,8 +2292,9 @@ class Trainer():
 
         pred_idx = probs.argmax(axis=0)  # (H, W) channel index 0..C-1
         # Map channel index → class value (e.g. when ignore_background=True,
-        # channel 0 may correspond to class value 1, etc.).
-        class_values_arr = np.asarray(self.class_values, dtype=np.int64)
+        # channel 0 may correspond to class value 1, etc.). class_repr gives one
+        # scalar per channel (a merged class's list collapses to its first value).
+        class_values_arr = np.asarray(self.class_repr, dtype=np.int64)
         out = class_values_arr[pred_idx]
 
         if return_entropy:
@@ -2281,6 +2320,7 @@ class Trainer():
         palette = [0] * (256 * 3)
         for entry in self.ontology["ontology"].values():
             v = entry["value"]
+            v = v[0] if isinstance(v, list) else v  # merged class: palette its representative value
             hex_color = entry["color"].lstrip("#")
             palette[3 * v:3 * v + 3] = [
                 int(hex_color[0:2], 16),
@@ -2478,6 +2518,7 @@ def parse_args():
     # --- Augmentation (defaults reproduce the long-standing hardcoded pipeline) ---
     parser.add_argument('--aug_photometric', default=False, action='store_true', help='add mild brightness/contrast + gentle hue/sat jitter to training augmentation. Off by default (legacy pipeline was geometry-only).')
     parser.add_argument('--aug_scale_limit', default=0.1, type=float, help='ShiftScaleRotate scale_limit in training augmentation (legacy default 0.1; try 0.25 for more scale variety).')
+    parser.add_argument('--merge_cyanos', default=False, action='store_true', help='atto only: fold cyanosliverwort+cyanosmoss+cyanosbark into one "cyanos" class (loads ontology_atto_cyanos_merged.json). Trains a 6-class model; in-training metrics/confusion matrices come out already merged. Raw masks untouched. Off by default (8-class legacy).')
     args = parser.parse_args()
     return args
 
@@ -2521,6 +2562,7 @@ if __name__ == "__main__":
     hard_sample_strength = args.hard_sample_strength
     hard_sample_ema = args.hard_sample_ema
     optimizer_name = {'adam': 'Adam', 'adamw': 'AdamW', 'sgd': 'SGD'}[args.optimizer]
+    merge_cyanos = args.merge_cyanos
 
     if data_leakage:
         print(" CAUTION: \n Data leakage is allowed in cross validation! \n Subimages from one original image might be placed in training and validation set.")
@@ -2566,6 +2608,7 @@ if __name__ == "__main__":
                           ema_decay=args.ema_decay,
                           aug_photometric=args.aug_photometric,
                           aug_scale_limit=args.aug_scale_limit,
+                          merge_cyanos=merge_cyanos,
                           )
         for encoder in encoder_list:
             trainer.set_encoder(encoder) # set encoder for model
