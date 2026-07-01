@@ -23,7 +23,7 @@ def configure(project_name: str, exp_num: str):
     project = project_name
     cv_exp_num = exp_num
     SUMMARY_DIR = Path(
-        r"C:\Users\faulhamm\Documents\Philipp\Code\cc-machine-learning\results\02-cc-{0}\cross_val_{1}\summary".format(project, cv_exp_num)
+        r"C:\Users\faulhamm\Documents\Philipp\Code\cc-machine-learning\results\{0}\cross_val_{1}\summary".format(project, cv_exp_num)
     )
 
 
@@ -56,18 +56,32 @@ def plot_metric_bars(per_class: pd.DataFrame, metric: str, out_path: Path,
     means = per_class[f"{metric}_mean"].to_numpy()
     stds = per_class[f"{metric}_std"].to_numpy()
 
+    is_iou = metric == "iou"
+    if is_iou:
+        means = means * 100
+        stds = stds * 100
+        ylabel = "IoU (%)"
+        ylim = (0, 105)
+        label_fmt = "{:.1f}"
+        label_offset = 0.5
+    else:
+        ylabel = metric.capitalize()
+        ylim = (0, 1.05)
+        label_fmt = "{:.3f}"
+        label_offset = 0.01
+
     fig, ax = plt.subplots(figsize=(10, 5))
     x = np.arange(len(classes))
     bars = ax.bar(x, means, yerr=stds, capsize=4, color=colors_for(classes, class_colors),
                   edgecolor="black", linewidth=0.5, error_kw={"elinewidth": 1.2})
     ax.set_xticks(x)
     ax.set_xticklabels(classes, rotation=30, ha="right")
-    ax.set_ylabel(metric.upper() if metric == "iou" else metric.capitalize())
-    ax.set_ylim(0, 1.05)
-    ax.set_title(f"Per-class {metric.upper() if metric == 'iou' else metric}  (mean ± SD, 5-fold CV)")
+    ax.set_ylabel(ylabel)
+    ax.set_ylim(*ylim)
+    ax.set_title(f"Per-class {ylabel if is_iou else metric}  (mean ± SD, 5-fold CV)")
     ax.grid(axis="y", alpha=0.3, linestyle="--")
     for bar, m in zip(bars, means):
-        ax.text(bar.get_x() + bar.get_width() / 2, m + 0.01, f"{m:.3f}",
+        ax.text(bar.get_x() + bar.get_width() / 2, m + label_offset, label_fmt.format(m),
                 ha="center", va="bottom", fontsize=8)
     fig.tight_layout()
     fig.savefig(out_path, dpi=200)
@@ -78,9 +92,9 @@ def plot_iou_with_folds(per_class: pd.DataFrame, per_fold: pd.DataFrame, out_pat
                         class_colors: dict):
     """IoU bars with individual fold values overlaid as dots."""
     classes = per_class["class"].tolist()
-    means = per_class["iou_mean"].to_numpy()
-    stds = per_class["iou_std"].to_numpy()
-    pooled = per_class["iou_pooled"].to_numpy()
+    means = per_class["iou_mean"].to_numpy() * 100
+    stds = per_class["iou_std"].to_numpy() * 100
+    pooled = per_class["iou_pooled"].to_numpy() * 100
 
     fig, ax = plt.subplots(figsize=(11, 5.5))
     x = np.arange(len(classes))
@@ -89,7 +103,7 @@ def plot_iou_with_folds(per_class: pd.DataFrame, per_fold: pd.DataFrame, out_pat
            error_kw={"elinewidth": 1.2})
 
     for i, cls in enumerate(classes):
-        vals = per_fold.loc[per_fold["class"] == cls, "iou"].to_numpy()
+        vals = per_fold.loc[per_fold["class"] == cls, "iou"].to_numpy() * 100
         jitter = np.random.uniform(-0.12, 0.12, size=len(vals))
         ax.scatter(np.full_like(vals, i) + jitter, vals, s=24, color="black",
                    zorder=3, alpha=0.7, label="per-fold" if i == 0 else None)
@@ -99,8 +113,8 @@ def plot_iou_with_folds(per_class: pd.DataFrame, per_fold: pd.DataFrame, out_pat
 
     ax.set_xticks(x)
     ax.set_xticklabels(classes, rotation=30, ha="right")
-    ax.set_ylabel("IoU")
-    ax.set_ylim(0, 1.05)
+    ax.set_ylabel("IoU (%)")
+    ax.set_ylim(0, 105)
     ax.set_title("Per-class IoU across 5-fold CV")
     ax.grid(axis="y", alpha=0.3, linestyle="--")
     ax.legend(loc="lower left", fontsize=9)
@@ -117,10 +131,16 @@ def plot_all_metrics_grid(per_class: pd.DataFrame, out_path: Path, class_colors:
     for ax, metric in zip(axes.flat, METRICS):
         means = per_class[f"{metric}_mean"].to_numpy()
         stds = per_class[f"{metric}_std"].to_numpy()
+        if metric == "iou":
+            means = means * 100
+            stds = stds * 100
+            ax.set_title("IoU (%)")
+            ax.set_ylim(0, 105)
+        else:
+            ax.set_title(metric.capitalize())
+            ax.set_ylim(0, 1.05)
         ax.bar(x, means, yerr=stds, capsize=3, color=bar_colors,
                edgecolor="black", linewidth=0.4, error_kw={"elinewidth": 1.0})
-        ax.set_title(metric.upper() if metric == "iou" else metric.capitalize())
-        ax.set_ylim(0, 1.05)
         ax.grid(axis="y", alpha=0.3, linestyle="--")
         ax.set_xticks(x)
         ax.set_xticklabels(classes, rotation=30, ha="right")

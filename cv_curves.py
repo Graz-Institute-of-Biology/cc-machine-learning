@@ -18,11 +18,19 @@ project = "gg"  # project name either "atto" or "gg"
 
 def configure(project_name: str, exp_num: str):
     """Point the module at a different project / CV run (used by cv_complete_analysis)."""
-    global project, cv_exp_num, CV_ROOT, OUT_DIR
+    global project, cv_exp_num, CV_ROOT, OUT_DIR, LOWER_IOU_BOUND
     project = project_name
     cv_exp_num = exp_num
+
+    if project == "cc":
+        LOWER_IOU_BOUND = 60
+    elif project == "atto":
+        LOWER_IOU_BOUND = 0
+    else:
+        LOWER_IOU_BOUND = 0  # default for unknown project
+
     CV_ROOT = Path(
-        r"C:\Users\faulhamm\Documents\Philipp\Code\cc-machine-learning\results\02-cc-{0}\cross_val_{1}".format(project, cv_exp_num)
+        r"C:\Users\faulhamm\Documents\Philipp\Code\cc-machine-learning\results\{0}\cross_val_{1}".format(project, cv_exp_num)
     )
     OUT_DIR = CV_ROOT / "summary"
 
@@ -65,6 +73,11 @@ def plot_curves(folds, col: str, ylabel: str, title: str, out_path: Path,
     valid_arr = stack(folds, "valid", col)
     epochs = np.arange(train_arr.shape[1])
 
+    is_iou = col == "iou_score"
+    scale = 100.0 if is_iou else 1.0
+    train_arr = train_arr * scale
+    valid_arr = valid_arr * scale
+
     train_mean = train_arr.mean(axis=0)
     train_std = train_arr.std(axis=0, ddof=1)
     valid_mean = valid_arr.mean(axis=0)
@@ -73,10 +86,10 @@ def plot_curves(folds, col: str, ylabel: str, title: str, out_path: Path,
     fig, ax = plt.subplots(figsize=(11, 5.5))
 
     for i, f in enumerate(folds):
-        ax.plot(f["train"].index, f["train"][col], color="#4C78A8",
+        ax.plot(f["train"].index, f["train"][col] * scale, color="#4C78A8",
                 alpha=0.25, linewidth=1,
                 label="train (per fold)" if i == 0 else None)
-        ax.plot(f["valid"].index, f["valid"][col], color="#E45756",
+        ax.plot(f["valid"].index, f["valid"][col] * scale, color="#E45756",
                 alpha=0.25, linewidth=1,
                 label="valid (per fold)" if i == 0 else None)
 
@@ -88,18 +101,21 @@ def plot_curves(folds, col: str, ylabel: str, title: str, out_path: Path,
                     color="#E45756", alpha=0.18, label="valid ±SD")
 
     if mark_best:
-        for f in folds:
+        for idx, f in enumerate(folds):
             # Best epoch = where the model-selection signal peaked (matches
             # best_model.pth), marked on whichever curve is being plotted.
             best_ep = int(f["valid"][selection_column(f["valid"])].idxmax())
-            best_val = f["valid"][col].loc[best_ep]
+            best_val = f["valid"][col].loc[best_ep] * scale
             ax.scatter([best_ep], [best_val], marker="*", s=110, color="black",
-                       zorder=5, edgecolor="white", linewidth=0.6)
+                       zorder=5, edgecolor="white", linewidth=0.6,
+                       label="best epoch" if idx == 0 else None)
 
     ax.set_xlabel("Epoch")
-    ax.set_ylabel(ylabel)
+    ax.set_ylabel("IoU (%)" if is_iou else ylabel)
     ax.set_title(title)
     ax.grid(alpha=0.3, linestyle="--")
+    if is_iou:
+        ax.set_ylim(LOWER_IOU_BOUND, 100)
     ax.legend(loc="best", fontsize=9, ncol=2)
     fig.tight_layout()
     fig.savefig(out_path, dpi=200)
@@ -113,44 +129,49 @@ def plot_combined(folds, out_path: Path):
         ("iou_score", "IoU", "IoU convergence", True),
     ]
     for ax, (col, ylabel, title, mark_best) in zip(axes, specs):
-        train_arr = stack(folds, "train", col)
-        valid_arr = stack(folds, "valid", col)
+        is_iou = col == "iou_score"
+        scale = 100.0 if is_iou else 1.0
+        train_arr = stack(folds, "train", col) * scale
+        valid_arr = stack(folds, "valid", col) * scale
         epochs = np.arange(train_arr.shape[1])
 
         for i, f in enumerate(folds):
-            ax.plot(f["train"].index, f["train"][col], color="#4C78A8",
+            ax.plot(f["train"].index, f["train"][col] * scale, color="#4C78A8",
                     alpha=0.25, linewidth=1,
                     label="train (per fold)" if i == 0 else None)
-            ax.plot(f["valid"].index, f["valid"][col], color="#E45756",
+            ax.plot(f["valid"].index, f["valid"][col] * scale, color="#E45756",
                     alpha=0.25, linewidth=1,
                     label="valid (per fold)" if i == 0 else None)
 
-        ax.plot(epochs, train_arr.mean(axis=0), color="#4C78A8",
+        train_mean = train_arr.mean(axis=0)
+        train_std = train_arr.std(axis=0, ddof=1)
+        valid_mean = valid_arr.mean(axis=0)
+        valid_std = valid_arr.std(axis=0, ddof=1)
+
+        ax.plot(epochs, train_mean, color="#4C78A8",
                 linewidth=2.2, label="train (mean)")
-        ax.fill_between(epochs,
-                        train_arr.mean(axis=0) - train_arr.std(axis=0, ddof=1),
-                        train_arr.mean(axis=0) + train_arr.std(axis=0, ddof=1),
-                        color="#4C78A8", alpha=0.18)
-        ax.plot(epochs, valid_arr.mean(axis=0), color="#E45756",
+        ax.fill_between(epochs, train_mean - train_std, train_mean + train_std,
+                        color="#4C78A8", alpha=0.18, label="train ±SD")
+        ax.plot(epochs, valid_mean, color="#E45756",
                 linewidth=2.2, label="valid (mean)")
-        ax.fill_between(epochs,
-                        valid_arr.mean(axis=0) - valid_arr.std(axis=0, ddof=1),
-                        valid_arr.mean(axis=0) + valid_arr.std(axis=0, ddof=1),
-                        color="#E45756", alpha=0.18)
+        ax.fill_between(epochs, valid_mean - valid_std, valid_mean + valid_std,
+                        color="#E45756", alpha=0.18, label="valid ±SD")
 
         if mark_best:
             for f in folds:
                 best_ep = int(f["valid"][selection_column(f["valid"])].idxmax())
-                best_val = f["valid"][col].loc[best_ep]
+                best_val = f["valid"][col].loc[best_ep] * scale
                 ax.scatter([best_ep], [best_val], marker="*", s=110,
                            color="black", zorder=5, edgecolor="white", linewidth=0.6,
                            label="best epoch" if f["cv"] == 0 else None)
 
         ax.set_xlabel("Epoch")
-        ax.set_ylabel(ylabel)
+        ax.set_ylabel("IoU (%)" if is_iou else ylabel)
         ax.set_title(title)
         ax.grid(alpha=0.3, linestyle="--")
-        ax.legend(loc="best", fontsize=9)
+        if is_iou:
+            ax.set_ylim(LOWER_IOU_BOUND, 100)
+        ax.legend(loc="best", fontsize=9, ncol=2)
     fig.suptitle("5-fold CV convergence", y=1.0, fontsize=13)
     fig.tight_layout()
     fig.savefig(out_path, dpi=200)

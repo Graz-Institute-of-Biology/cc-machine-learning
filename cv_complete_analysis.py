@@ -13,8 +13,8 @@ import cv_error_analysis
 import cv_curves
 import cv_error_plots
 
-project = "gg"        # "atto" or "gg"
-cv_exp_num = "02"     # which CV run to analyze (part of the results path)
+project = "atto"        # "atto" or "cc"
+cv_exp_num = "01"     # which CV run to analyze (part of the results path)
 
 
 def main():

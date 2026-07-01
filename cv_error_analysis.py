@@ -21,7 +21,7 @@ def configure(project_name: str, exp_num: str):
     global project, cv_exp_num, CV_ROOT, OUT_DIR
     project = project_name
     cv_exp_num = exp_num
-    CV_ROOT = Path(r"C:\Users\faulhamm\Documents\Philipp\Code\cc-machine-learning\results\02-cc-{0}\cross_val_{1}".format(project, cv_exp_num))
+    CV_ROOT = Path(r"C:\Users\faulhamm\Documents\Philipp\Code\cc-machine-learning\results\{0}\cross_val_{1}".format(project, cv_exp_num))
     OUT_DIR = CV_ROOT / "summary"
 
 
